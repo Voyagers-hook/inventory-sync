@@ -121,31 +121,18 @@ class SquarespaceClient:
     def update_order_fulfillment(self, order_id: str, tracking_number: str, carrier: str):
         """Mark a Squarespace order as shipped with tracking info.
         
-        Squarespace requires line item IDs in the fulfillment request.
-        We fetch the order first to get those IDs.
+        Uses the correct Squarespace Commerce API format:
+        POST /commerce/orders/{id}/fulfillments with a top-level "shipments" array.
+        Required fields: shipDate, carrierName, service, trackingNumber.
         """
-        # Fetch order to get line item IDs
-        order_r = requests.get(
-            f"{BASE_URL}/commerce/orders/{order_id}",
-            headers=self.headers, timeout=30,
-        )
-        order_r.raise_for_status()
-        order_data = order_r.json()
-        line_items = [
-            {"lineItemId": item["id"], "quantity": item.get("quantity", 1)}
-            for item in order_data.get("lineItems", [])
-        ]
-        if not line_items:
-            logger.warning(f"No line items found for SS order {order_id}, skipping fulfillment")
-            return
+        from datetime import datetime, timezone
         payload = {
             "shouldSendNotification": True,
-            "fulfillments": [{
-                "lineItems": line_items,
-                "shipment": {
-                    "trackingNumber": tracking_number,
-                    "carrierName": carrier,
-                }
+            "shipments": [{
+                "shipDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "carrierName": carrier if carrier else "Other",
+                "service": "Standard Delivery",
+                "trackingNumber": tracking_number,
             }]
         }
         r = requests.post(
