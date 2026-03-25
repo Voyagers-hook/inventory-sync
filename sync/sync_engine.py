@@ -320,8 +320,20 @@ class SyncEngine:
     # ─── Full Sync ───────────────────────────────────────────────────────────
 
     def run_full_sync(self):
-        since = self.db.get_setting("last_full_sync") or (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
         total = 0
+        # On first run (no products in DB), do a full catalogue import first
+        product_count = self.db.count_products()
+        if product_count == 0:
+            logger.info("No products in DB — running initial catalogue import...")
+            total += self.sync_product_catalogue()
+
+        last = self.db.get_setting("last_full_sync")
+        if last:
+            since = last
+        else:
+            # First run: look back 90 days for orders
+            since = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         total += self.process_squarespace_orders(since)
         total += self.process_ebay_orders(since)
         total += self.sync_pending_price_changes()
