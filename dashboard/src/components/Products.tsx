@@ -508,7 +508,7 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
                       <td>
                         <div className="flex items-center gap-2">
                           {linked
-                            ? <Link size={11} className="text-success flex-shrink-0" title="Linked across platforms" />
+                            ? <Link size={11} className="text-success flex-shrink-0" />
                             : <Unlink size={11} className="text-base-content/20 flex-shrink-0" />
                           }
                           <span className="text-sm font-medium text-base-content truncate max-w-[150px] sm:max-w-[200px]">{p.name}</span>
