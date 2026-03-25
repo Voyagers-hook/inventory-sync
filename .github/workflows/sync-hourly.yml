@@ -1,0 +1,32 @@
+name: Hourly Inventory Sync
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # Every hour on the hour (UTC)
+  workflow_dispatch:       # Can also be triggered manually from GitHub UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r sync/requirements.txt
+
+      - name: Run full sync
+        working-directory: sync
+        run: python main.py --mode full
+        env:
+          SQUARESPACE_API_KEY:  ${{ secrets.SQUARESPACE_API_KEY }}
+          EBAY_APP_ID:          ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID:         ${{ secrets.EBAY_CERT_ID }}
+          EBAY_REFRESH_TOKEN:   ${{ secrets.EBAY_REFRESH_TOKEN }}
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
