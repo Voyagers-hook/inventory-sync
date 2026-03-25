@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useMemo } from 'react';
 import { PoundSterling, ShoppingCart, AlertTriangle, Package, RefreshCw, Clock, ChevronRight } from 'lucide-react';
 import type { Product, Inventory, Pricing, Order, SyncLog, Setting, TabName } from '../types';
-import { updateSetting } from '../utils/supabase';
+import { updateSetting, triggerQuickSync } from '../utils/supabase';
 
 interface DashboardProps {
   products: Product[];
@@ -107,8 +107,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
     setSyncing(true);
     try {
       await updateSetting('manual_sync_requested', 'true');
-      setToast('Sync queued — will run in the next cycle.');
-      setTimeout(() => setToast(''), 4000);
+      const triggered = await triggerQuickSync();
+      setToast(triggered
+        ? '✓ Sync triggered — running now (~1 min)'
+        : '✓ Sync queued — will run on next hourly cycle'
+      );
+      setTimeout(() => setToast(''), 5000);
     } catch {
       setToast('Failed to request sync');
       setTimeout(() => setToast(''), 3000);
