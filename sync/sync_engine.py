@@ -17,25 +17,108 @@ class SyncEngine:
     # ─── Product Catalogue Sync ──────────────────────────────────────────────
 
     def sync_product_catalogue(self):
-        """Pull products from Squarespace and ensure they exist in our DB."""
-        logger.info("Syncing product catalogue from Squarespace...")
-        ss_products = self.ss.get_products()
+        """Full initial import: pull ALL products from both Squarespace and eBay,
+        create product records, inventory records, and pricing records."""
+        logger.info("Syncing product catalogue from both platforms...")
         synced = 0
+
+        # ── Squarespace Products ──────────────────────────────────────────
+        ss_products = self.ss.get_products()
+
+        # Build inventory lookup: variantId → quantity
+        ss_inventory_raw = self.ss.get_inventory()
+        ss_stock_map = {}
+        for inv_item in ss_inventory_raw:
+            vid = inv_item.get("variantId")
+            if vid:
+                ss_stock_map[vid] = inv_item.get("quantity", 0)
+
         for prod in ss_products:
             for variant in prod.get("variants", []):
                 sku = variant.get("sku") or f"SS-{prod['id']}-{variant['id']}"
                 existing = self.db.get_product_by_sku(sku)
                 if not existing:
-                    self.db.upsert_product({
+                    rows = self.db.upsert_product({
                         "name": prod.get("name", "Unnamed"),
                         "sku": sku,
                         "squarespace_product_id": prod["id"],
                         "squarespace_variant_id": variant["id"],
                         "description": prod.get("description", ""),
                     })
+                    existing = rows[0] if rows else self.db.get_product_by_sku(sku)
                     synced += 1
-        logger.info(f"Catalogue sync: {synced} new products added, {len(ss_products)} total SS products")
-        return synced
+
+                if existing:
+                    product_id = existing["id"]
+                    # Upsert inventory record
+                    stock_qty = ss_stock_map.get(variant["id"], 0)
+                    self.db.upsert_inventory({
+                        "product_id": product_id,
+                        "total_stock": stock_qty,
+                        "last_synced_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    # Upsert pricing record for Squarespace
+                    price_val = variant.get("pricing", {}).get("basePrice", {}).get("value", "0")
+                    self.db.upsert_price({
+                        "product_id": product_id,
+                        "platform": "squarespace",
+                        "price": float(price_val),
+                        "currency": "GBP",
+                        "sync_pending": False,
+                    })
+
+        logger.info(f"Squarespace catalogue: {synced} new products, {len(ss_products)} total SS products")
+
+        # ── eBay Products ─────────────────────────────────────────────────
+        ebay_items = self.ebay.get_inventory_items()
+        ebay_synced = 0
+
+        for item in ebay_items:
+            sku = item.get("sku")
+            if not sku:
+                continue
+            existing = self.db.get_product_by_sku(sku)
+            if not existing:
+                name = item.get("product", {}).get("title", "Unnamed")
+                rows = self.db.upsert_product({
+                    "name": name,
+                    "sku": sku,
+                    "ebay_inventory_item_key": sku,
+                    "description": item.get("product", {}).get("description", ""),
+                })
+                existing = rows[0] if rows else self.db.get_product_by_sku(sku)
+                ebay_synced += 1
+
+            if existing:
+                product_id = existing["id"]
+                # Upsert inventory record
+                stock_qty = item.get("availability", {}).get(
+                    "shipToLocationAvailability", {}).get("quantity", 0)
+                self.db.upsert_inventory({
+                    "product_id": product_id,
+                    "total_stock": stock_qty,
+                    "last_synced_at": datetime.now(timezone.utc).isoformat(),
+                })
+                # Upsert pricing record for eBay
+                try:
+                    offers = self.ebay.get_offers_for_sku(sku)
+                    if offers:
+                        price_val = offers[0].get("pricingSummary", {}).get(
+                            "price", {}).get("value", "0")
+                        self.db.upsert_price({
+                            "product_id": product_id,
+                            "platform": "ebay",
+                            "price": float(price_val),
+                            "currency": "GBP",
+                            "sync_pending": False,
+                        })
+                except Exception as e:
+                    logger.warning(f"Could not fetch eBay offers for SKU {sku}: {e}")
+
+        logger.info(f"eBay catalogue: {ebay_synced} new products, {len(ebay_items)} total eBay items")
+        total_synced = synced + ebay_synced
+        logger.info(f"Catalogue sync complete: {total_synced} new products added across both platforms")
+        return total_synced
 
     # ─── Order Processing ────────────────────────────────────────────────────
 
@@ -50,6 +133,13 @@ class SyncEngine:
                 continue
             if order.get("fulfillmentStatus") not in ("PENDING", "FULFILLED"):
                 continue
+
+            # Extract customer info
+            billing = order.get("billingAddress", {})
+            shipping = order.get("shippingAddress", {}) or billing
+            customer_name = f"{shipping.get('firstName', '')} {shipping.get('lastName', '')}".strip()
+            customer_email = order.get("customerEmail", "")
+
             for line in order.get("lineItems", []):
                 variant_id = line.get("variantId")
                 qty_sold   = int(line.get("quantity", 1))
@@ -60,7 +150,7 @@ class SyncEngine:
                 if not product:
                     logger.warning(f"SKU {sku} not in DB, skipping")
                     continue
-                # Record sale
+                # Record sale with customer details
                 self.db.insert_order({
                     "platform": "squarespace",
                     "platform_order_id": order_id,
@@ -69,6 +159,18 @@ class SyncEngine:
                     "sale_price": price,
                     "currency": "GBP",
                     "sale_date": order.get("createdOn"),
+                    "customer_name": customer_name,
+                    "customer_email": customer_email,
+                    "shipping_address_line1": shipping.get("address1", ""),
+                    "shipping_address_line2": shipping.get("address2", ""),
+                    "shipping_city": shipping.get("city", ""),
+                    "shipping_county": shipping.get("state", ""),
+                    "shipping_postcode": shipping.get("postalCode", ""),
+                    "shipping_country": shipping.get("countryCode", ""),
+                    "fulfillment_status": order.get("fulfillmentStatus", "PENDING"),
+                    "order_total": float(order.get("grandTotal", {}).get("value", 0)),
+                    "item_name": line.get("productName", ""),
+                    "order_number": order.get("orderNumber", ""),
                 })
                 # Update DB inventory
                 inv_rows = self.db.get_inventory(product["id"])
@@ -101,6 +203,14 @@ class SyncEngine:
             order_id = order.get("orderId")
             if self.db.order_exists("ebay", order_id):
                 continue
+
+            # Extract customer info
+            ship_to = order.get("fulfillmentStartInstructions", [{}])[0].get(
+                "shippingStep", {}).get("shipTo", {})
+            contact = ship_to.get("fullName", "")
+            address = ship_to.get("contactAddress", {})
+            buyer_info = order.get("buyer", {})
+
             for line in order.get("lineItems", []):
                 sku      = line.get("sku", "")
                 qty_sold = int(line.get("quantity", 1))
@@ -117,6 +227,18 @@ class SyncEngine:
                     "sale_price": price,
                     "currency": "GBP",
                     "sale_date": order.get("creationDate"),
+                    "customer_name": contact,
+                    "customer_email": buyer_info.get("username", "") + "@ebay.com",
+                    "shipping_address_line1": address.get("addressLine1", ""),
+                    "shipping_address_line2": address.get("addressLine2", ""),
+                    "shipping_city": address.get("city", ""),
+                    "shipping_county": address.get("stateOrProvince", ""),
+                    "shipping_postcode": address.get("postalCode", ""),
+                    "shipping_country": address.get("countryCode", ""),
+                    "fulfillment_status": "NOT_STARTED" if order.get("orderFulfillmentStatus") == "NOT_STARTED" else "IN_PROGRESS",
+                    "order_total": float(order.get("totalFeeBasisAmount", {}).get("value", 0)),
+                    "item_name": line.get("title", ""),
+                    "order_number": order.get("orderId", ""),
                 })
                 inv_rows = self.db.get_inventory(product["id"])
                 if inv_rows:

@@ -1,9 +1,10 @@
 """
 Entry point for the inventory sync.
 Usage:
-  python main.py --mode full    # Full hourly sync
-  python main.py --mode quick   # Quick check (runs if manual_sync_requested flag set)
+  python main.py --mode full       # Full hourly sync
+  python main.py --mode quick      # Quick check (runs if manual_sync_requested flag set)
   python main.py --mode catalogue  # Sync product catalogue only (first-time setup)
+  python main.py --mode import     # Alias for catalogue (full initial import from both platforms)
 """
 import argparse
 import logging
@@ -32,7 +33,7 @@ def check_env():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["full", "quick", "catalogue"], default="full")
+    parser.add_argument("--mode", choices=["full", "quick", "catalogue", "import"], default="full")
     args = parser.parse_args()
 
     check_env()
@@ -52,7 +53,7 @@ def main():
     items  = 0
 
     try:
-        if args.mode == "catalogue":
+        if args.mode in ("catalogue", "import"):
             items = engine.sync_product_catalogue()
         elif args.mode == "full":
             items = engine.run_full_sync()

@@ -112,3 +112,21 @@ class SquarespaceClient:
         }
         self._post(f"/commerce/products/{product_id}", payload)
         logger.info(f"SS price updated product {product_id} variant {variant_id} → £{price:.2f}")
+
+    # ─── Fulfillment / Tracking ────────────────────────────────────────────────
+
+    def update_order_fulfillment(self, order_id: str, tracking_number: str, carrier: str):
+        """Mark a Squarespace order as shipped with tracking info."""
+        payload = {
+            "shipments": [{
+                "trackingNumber": tracking_number,
+                "carrierName": carrier,
+                "shipDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            }]
+        }
+        r = requests.post(
+            f"{BASE_URL}/commerce/orders/{order_id}/fulfillments",
+            headers=self.headers, json=payload, timeout=30,
+        )
+        r.raise_for_status()
+        logger.info(f"SS fulfillment created for order {order_id}: {carrier} {tracking_number}")

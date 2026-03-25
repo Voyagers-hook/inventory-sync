@@ -118,6 +118,22 @@ class Database:
             params["platform"] = f"eq.{platform}"
         return self._rest("GET", "orders", params=params)
 
+    def get_order_by_id(self, order_id: str):
+        """Get a single order by its database ID."""
+        rows = self._rest("GET", "orders", params={"id": f"eq.{order_id}", "select": "*"})
+        return rows[0] if rows else None
+
+    def update_order_tracking(self, order_id: str, tracking_number: str, carrier: str, status: str = "SHIPPED"):
+        """Update tracking info on an order."""
+        r = requests.patch(
+            f"{self.url}/rest/v1/orders",
+            headers=self.headers,
+            params={"id": f"eq.{order_id}"},
+            json={"tracking_number": tracking_number, "tracking_carrier": carrier, "fulfillment_status": status},
+            timeout=30,
+        )
+        r.raise_for_status()
+
     # ─── Daily Snapshots (trends) ────────────────────────────────────────────
 
     def upsert_snapshot(self, snap: dict):

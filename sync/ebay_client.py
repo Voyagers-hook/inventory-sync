@@ -184,3 +184,30 @@ class EbayClient:
             if offset >= total:
                 break
         return orders
+
+    # ─── Shipping Fulfillment ─────────────────────────────────────────────────
+
+    def create_shipping_fulfillment(self, order_id: str, tracking_number: str, carrier: str, line_item_ids: list = None):
+        """Create a shipping fulfillment with tracking for an eBay order."""
+        # Get order to find line item IDs if not provided
+        if not line_item_ids:
+            r = requests.get(
+                f"{BASE_URL}/sell/fulfillment/v1/order/{order_id}",
+                headers=self._headers(), timeout=30,
+            )
+            r.raise_for_status()
+            order_data = r.json()
+            line_item_ids = [li["lineItemId"] for li in order_data.get("lineItems", [])]
+
+        payload = {
+            "lineItems": [{"lineItemId": lid, "quantity": 1} for lid in line_item_ids],
+            "shippingCarrierCode": carrier,
+            "trackingNumber": tracking_number,
+        }
+        r = requests.post(
+            f"{BASE_URL}/sell/fulfillment/v1/order/{order_id}/shipping_fulfillment",
+            headers=self._headers(), json=payload, timeout=30,
+        )
+        r.raise_for_status()
+        logger.info(f"eBay tracking uploaded for order {order_id}: {carrier} {tracking_number}")
+        return r.json()
