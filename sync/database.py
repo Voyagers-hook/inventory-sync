@@ -34,11 +34,9 @@ class Database:
 
     # ─── Settings (key-value) ────────────────────────────────────────────────
 
-
     def ensure_schema(self):
         """Apply any required schema migrations (idempotent)."""
         try:
-            # Add tracking_pushed_at column if missing
             r = requests.post(
                 f"{self.url}/rest/v1/rpc/exec_migration",
                 headers=self.headers,
@@ -47,8 +45,6 @@ class Database:
             )
         except Exception:
             pass
-        # Alternative: just try to patch a dummy row to check the column exists
-        # We handle missing column gracefully in get_orders_needing_tracking_push
 
     def count_products(self):
         """Return total number of products in DB."""
@@ -79,14 +75,12 @@ class Database:
     # ─── Platform Pricing Lookups ────────────────────────────────────────────
 
     def get_platform_pricing_for_product(self, product_id: str, platform: str = None):
-        """Query platform_pricing by product_id and optionally platform."""
         params = {"select": "*", "product_id": f"eq.{product_id}"}
         if platform:
             params["platform"] = f"eq.{platform}"
         return self._rest("GET", "platform_pricing", params=params)
 
     def get_product_by_platform_id(self, platform: str, platform_product_id: str):
-        """Find the product via platform_pricing using the platform and platform_product_id."""
         rows = self._rest("GET", "platform_pricing",
                           params={"platform": f"eq.{platform}",
                                   "platform_product_id": f"eq.{platform_product_id}",
@@ -124,9 +118,6 @@ class Database:
                           headers_extra={"Prefer": "resolution=merge-duplicates,return=representation"})
 
     def get_pending_price_changes(self):
-        """Return platform_pricing rows where updated_at > last_synced_at (needs syncing)."""
-        # Use PostgREST column-to-column filter: updated_at greater than last_synced_at
-        # We fetch all and filter in Python since PostgREST doesn't easily support col>col
         rows = self._rest("GET", "platform_pricing", params={"select": "*"})
         pending = []
         for r in rows:
@@ -176,12 +167,10 @@ class Database:
         return self._rest("GET", "orders", params=params)
 
     def get_order_by_id(self, order_id: str):
-        """Get a single order by its database ID."""
         rows = self._rest("GET", "orders", params={"id": f"eq.{order_id}", "select": "*"})
         return rows[0] if rows else None
 
     def update_order_tracking(self, order_id: str, tracking_number: str, carrier: str, status: str = "SHIPPED"):
-        """Update tracking info on an order."""
         r = requests.patch(
             f"{self.url}/rest/v1/orders",
             headers=self.headers,
@@ -206,13 +195,12 @@ class Database:
             return []
 
     def mark_tracking_pushed(self, order_id: str):
-        """Mark an order's tracking as pushed to the platform."""
         try:
             r = requests.patch(
                 f"{self.url}/rest/v1/orders",
                 headers=self.headers,
                 params={"id": f"eq.{order_id}"},
-                json={"tracking_pushed_at": "now()"},
+                json={"tracking_pushed_at": datetime.now(timezone.utc).isoformat()},
                 timeout=30,
             )
             r.raise_for_status()
@@ -222,8 +210,27 @@ class Database:
     # ─── Sales Trends ────────────────────────────────────────────────────────
 
     def upsert_snapshot(self, snap: dict):
-        return self._rest("POST", "sales_trends", payload=snap,
-                          headers_extra={"Prefer": "resolution=merge-duplicates,return=representation"})
+        """Upsert a daily snapshot using delete-then-insert to avoid constraint issues."""
+        snap["updated_at"] = datetime.now(timezone.utc).isoformat()
+        # Delete any existing row for this exact date/product/platform combination
+        try:
+            params = {
+                "date": f"eq.{snap['date']}",
+                "platform": f"eq.{snap['platform']}",
+            }
+            if snap.get("product_id"):
+                params["product_id"] = f"eq.{snap['product_id']}"
+            else:
+                params["product_id"] = "is.null"
+            requests.delete(
+                f"{self.url}/rest/v1/sales_trends",
+                headers=self.headers,
+                params=params,
+                timeout=30,
+            )
+        except Exception as e:
+            logger.warning(f"Snapshot pre-delete failed (non-fatal): {e}")
+        return self._rest("POST", "sales_trends", payload=snap)
 
     def get_snapshots(self, product_id: str = None, days: int = 30):
         from datetime import timedelta
@@ -268,4 +275,3 @@ class Database:
 
     def clear_sync_request(self):
         self.set_setting("manual_sync_requested", "false")
-
