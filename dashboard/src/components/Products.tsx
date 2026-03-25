@@ -11,6 +11,8 @@ interface ProductsProps {
   inventory: Inventory[];
   pricing: Pricing[];
   onRefresh: () => void;
+  initialLowStockFilter?: boolean;
+  onFilterApplied?: () => void;
 }
 
 function isLinked(productId: string, pricing: Pricing[]): boolean {
@@ -244,8 +246,9 @@ const MergeModal: React.FC<{
 };
 
 // ─── Main Products Component ──────────────────────────────────────────────────
-export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing, onRefresh }) => {
+export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing, onRefresh, initialLowStockFilter, onFilterApplied }) => {
   const [search, setSearch] = useState('');
+  const [showLowStockOnly, setShowLowStockOnly] = useState(!!initialLowStockFilter);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showMerge, setShowMerge] = useState(false);
@@ -254,9 +257,20 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
   const [toast, setToast] = useState('');
   const [busy, setBusy] = useState(false);
 
+  // Apply the initialLowStockFilter on mount, then clear it
+  React.useEffect(() => {
+    if (initialLowStockFilter) {
+      setShowLowStockOnly(true);
+      onFilterApplied?.();
+    }
+  }, [initialLowStockFilter, onFilterApplied]);
+
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
   const filtered = products.filter(p => {
+    const inv = inventory.find(i => i.product_id === p.id);
+    const threshold = inv?.low_stock_threshold ?? 5;
+    if (showLowStockOnly && (!inv || inv.total_stock > threshold)) return false;
     if (!search) return true;
     const q = search.toLowerCase();
     return p.name?.toLowerCase().includes(q) || p.sku?.toLowerCase().includes(q);
@@ -318,6 +332,13 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
             onChange={e => setSearch(e.target.value)}
           />
         </div>
+        <button
+          className={`btn btn-sm gap-1.5 ${showLowStockOnly ? 'btn-error' : 'btn-ghost border border-base-300'}`}
+          onClick={() => setShowLowStockOnly(v => !v)}
+          title="Show only low-stock items"
+        >
+          <AlertTriangle size={14} /> {showLowStockOnly ? 'Low Stock Only' : 'Low Stock'}
+        </button>
         <button className="btn btn-primary btn-sm gap-1.5" onClick={() => setShowAdd(true)}>
           <Plus size={14} /> Add
         </button>

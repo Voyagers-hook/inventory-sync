@@ -20,6 +20,7 @@ const TABS: { id: TabName; label: string; icon: React.ReactElement }[] = [
 
 const App: React.FC = () => {
   const [tab, setTab] = useState<TabName>('dashboard');
+  const [filterLowStock, setFilterLowStock] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [products, setProducts] = useState<Product[]>([]);
@@ -144,10 +145,11 @@ const App: React.FC = () => {
               settings={settings}
               onRefresh={handleRefresh}
               onNavigate={setTab}
+              onNavigateLowStock={() => { setFilterLowStock(true); setTab('products'); }}
             />
           )}
           {tab === 'orders' && <Orders orders={orders} onRefresh={handleRefresh} />}
-          {tab === 'products' && <Products products={products} inventory={inventory} pricing={pricing} onRefresh={handleRefresh} />}
+          {tab === 'products' && <Products products={products} inventory={inventory} pricing={pricing} onRefresh={handleRefresh} initialLowStockFilter={filterLowStock} onFilterApplied={() => setFilterLowStock(false)} />}
           {tab === 'sales' && <Sales orders={orders} products={products} />}
           {tab === 'trends' && <Trends products={products} inventory={inventory} orders={orders} trends={trends} />}
           {tab === 'settings' && <Settings settings={settings} onRefresh={handleRefresh} />}

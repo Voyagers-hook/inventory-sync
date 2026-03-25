@@ -12,6 +12,7 @@ interface DashboardProps {
   settings: Setting[];
   onRefresh: () => void;
   onNavigate: (tab: TabName) => void;
+  onNavigateLowStock: () => void;
 }
 
 type RangeOption = '7d' | '30d' | '3m' | '12m' | 'all' | 'custom';
@@ -62,7 +63,7 @@ const RANGE_OPTIONS: { id: RangeOption; label: string }[] = [
 ];
 
 export const Dashboard: React.FC<DashboardProps> = ({
-  products, inventory, pricing, orders, syncLogs, settings, onRefresh, onNavigate
+  products, inventory, pricing, orders, syncLogs, settings, onRefresh, onNavigate, onNavigateLowStock
 }) => {
   const [range, setRange] = useState<RangeOption>('12m');
   const [customStart, setCustomStart] = useState('');
@@ -196,13 +197,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
         </div>
 
         {/* Low Stock */}
-        <div className="bg-base-100 rounded-xl border border-base-300 p-4 shadow-sm">
+        <div
+          className="bg-base-100 rounded-xl border border-base-300 p-4 shadow-sm cursor-pointer hover:border-red-300 hover:shadow-md transition-all group"
+          onClick={onNavigateLowStock}
+        >
           <div className="flex items-start justify-between mb-2">
             <p className="text-xs font-semibold text-base-content/40 uppercase tracking-wide">Low Stock</p>
             <div className="p-1.5 bg-red-50 rounded-lg"><AlertTriangle size={13} className="text-red-500" /></div>
           </div>
           <p className="text-2xl font-bold text-red-500">{stats.lowStock}</p>
-          <p className="text-xs text-base-content/40 mt-1.5">items need restocking</p>
+          <p className="text-xs text-base-content/40 mt-1.5 flex items-center gap-1">
+            items need restocking <span className="opacity-0 group-hover:opacity-100 transition-opacity">· click to view →</span>
+          </p>
         </div>
       </div>
 
