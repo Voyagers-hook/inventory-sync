@@ -418,12 +418,21 @@ class SyncEngine:
         return pushed
 
     def run_quick_check(self):
-        """Triggered on demand: push any pending tracking, then full sync if requested."""
+        """Triggered on demand: push pending tracking and pending stock changes immediately.
+        Also runs a full sync if manually requested via dashboard Sync Now button.
+        """
         count = 0
+
+        # Always push tracking and stock changes — these are time-sensitive
         pushed = self.push_pending_tracking()
         if pushed:
-            logger.info(f"Quick check: pushed {pushed} tracking number(s) to platforms")
+            logger.info(f"Quick check: pushed {pushed} tracking number(s)")
             count += pushed
+
+        stock_pushed = self.sync_pending_stock_changes()
+        if stock_pushed:
+            logger.info(f"Quick check: pushed stock for {stock_pushed} platform listing(s)")
+            count += stock_pushed
 
         if self.db.is_sync_requested():
             logger.info("Quick check: manual sync requested, running full sync...")
