@@ -81,7 +81,9 @@ class SquarespaceClient:
     # ─── Orders ─────────────────────────────────────────────────────────────────
 
     def get_orders(self, modified_after: str = None):
-        """Return all orders, optionally filtered by ISO8601 modifiedAfter date."""
+        """Return all orders, optionally filtered by date range.
+        Squarespace requires both modifiedAfter AND modifiedBefore together."""
+        from datetime import datetime, timezone
         orders, cursor = [], None
         while True:
             params = {}
@@ -89,6 +91,7 @@ class SquarespaceClient:
                 params["cursor"] = cursor
             if modified_after:
                 params["modifiedAfter"] = modified_after
+                params["modifiedBefore"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             data = self._get("/commerce/orders", params)
             orders.extend(data.get("result", []))
             pagination = data.get("pagination", {})
