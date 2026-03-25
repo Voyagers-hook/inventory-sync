@@ -3,6 +3,7 @@ Supabase (PostgreSQL) database client.
 All DB interactions go through this module.
 """
 import os
+import json
 import requests
 import logging
 from datetime import datetime, timezone
@@ -54,10 +55,26 @@ class Database:
         rows = self._rest("GET", "products", params={"sku": f"eq.{sku}", "select": "*"})
         return rows[0] if rows else None
 
-    def get_product_by_ss_id(self, ss_product_id: str):
-        rows = self._rest("GET", "products",
-                          params={"squarespace_product_id": f"eq.{ss_product_id}", "select": "*"})
-        return rows[0] if rows else None
+    # ─── Platform Pricing Lookups ────────────────────────────────────────────
+
+    def get_platform_pricing_for_product(self, product_id: str, platform: str = None):
+        """Query platform_pricing by product_id and optionally platform."""
+        params = {"select": "*", "product_id": f"eq.{product_id}"}
+        if platform:
+            params["platform"] = f"eq.{platform}"
+        return self._rest("GET", "platform_pricing", params=params)
+
+    def get_product_by_platform_id(self, platform: str, platform_product_id: str):
+        """Find the product via platform_pricing using the platform and platform_product_id."""
+        rows = self._rest("GET", "platform_pricing",
+                          params={"platform": f"eq.{platform}",
+                                  "platform_product_id": f"eq.{platform_product_id}",
+                                  "select": "product_id"})
+        if not rows:
+            return None
+        product_id = rows[0]["product_id"]
+        prod_rows = self._rest("GET", "products", params={"id": f"eq.{product_id}", "select": "*"})
+        return prod_rows[0] if prod_rows else None
 
     # ─── Inventory ───────────────────────────────────────────────────────────
 
@@ -72,30 +89,38 @@ class Database:
         return self._rest("POST", "inventory", payload=inv,
                           headers_extra={"Prefer": "resolution=merge-duplicates,return=representation"})
 
-    # ─── Pricing ─────────────────────────────────────────────────────────────
+    # ─── Platform Pricing ────────────────────────────────────────────────────
 
     def get_prices(self, product_id: str = None):
         params = {"select": "*"}
         if product_id:
             params["product_id"] = f"eq.{product_id}"
-        return self._rest("GET", "pricing", params=params)
+        return self._rest("GET", "platform_pricing", params=params)
 
     def upsert_price(self, price_row: dict):
         price_row["updated_at"] = datetime.now(timezone.utc).isoformat()
-        return self._rest("POST", "pricing", payload=price_row,
+        return self._rest("POST", "platform_pricing", payload=price_row,
                           headers_extra={"Prefer": "resolution=merge-duplicates,return=representation"})
 
     def get_pending_price_changes(self):
-        """Return pricing rows that have been updated but not yet synced."""
-        return self._rest("GET", "pricing",
-                          params={"select": "*", "sync_pending": "eq.true"})
+        """Return platform_pricing rows where updated_at > last_synced_at (needs syncing)."""
+        # Use PostgREST column-to-column filter: updated_at greater than last_synced_at
+        # We fetch all and filter in Python since PostgREST doesn't easily support col>col
+        rows = self._rest("GET", "platform_pricing", params={"select": "*"})
+        pending = []
+        for r in rows:
+            last_synced = r.get("last_synced_at")
+            updated = r.get("updated_at")
+            if updated and (not last_synced or updated > last_synced):
+                pending.append(r)
+        return pending
 
     def mark_price_synced(self, price_id: str):
         r = requests.patch(
-            f"{self.url}/rest/v1/pricing",
+            f"{self.url}/rest/v1/platform_pricing",
             headers=self.headers,
             params={"id": f"eq.{price_id}"},
-            json={"sync_pending": False},
+            json={"last_synced_at": datetime.now(timezone.utc).isoformat()},
             timeout=30,
         )
         r.raise_for_status()
@@ -113,7 +138,7 @@ class Database:
         return self._rest("POST", "orders", payload=order)
 
     def get_orders(self, platform: str = None, limit: int = 200):
-        params = {"select": "*", "order": "sale_date.desc", "limit": str(limit)}
+        params = {"select": "*", "order": "ordered_at.desc", "limit": str(limit)}
         if platform:
             params["platform"] = f"eq.{platform}"
         return self._rest("GET", "orders", params=params)
@@ -134,10 +159,10 @@ class Database:
         )
         r.raise_for_status()
 
-    # ─── Daily Snapshots (trends) ────────────────────────────────────────────
+    # ─── Sales Trends ────────────────────────────────────────────────────────
 
     def upsert_snapshot(self, snap: dict):
-        return self._rest("POST", "daily_snapshots", payload=snap,
+        return self._rest("POST", "sales_trends", payload=snap,
                           headers_extra={"Prefer": "resolution=merge-duplicates,return=representation"})
 
     def get_snapshots(self, product_id: str = None, days: int = 30):
@@ -146,7 +171,7 @@ class Database:
         params = {"select": "*", "date": f"gte.{cutoff}", "order": "date.asc"}
         if product_id:
             params["product_id"] = f"eq.{product_id}"
-        return self._rest("GET", "daily_snapshots", params=params)
+        return self._rest("GET", "sales_trends", params=params)
 
     # ─── Sync Log ────────────────────────────────────────────────────────────
 
@@ -157,12 +182,13 @@ class Database:
         return rows[0]["id"]
 
     def finish_sync_log(self, log_id: str, status: str, items: int = 0, errors: str = None):
+        details = json.dumps({"items_synced": items}) if items else None
         r = requests.patch(
             f"{self.url}/rest/v1/sync_log",
             headers=self.headers,
             params={"id": f"eq.{log_id}"},
-            json={"status": status, "items_synced": items,
-                  "errors": errors, "completed_at": datetime.now(timezone.utc).isoformat()},
+            json={"status": status, "details": details,
+                  "error_message": errors, "completed_at": datetime.now(timezone.utc).isoformat()},
             timeout=30,
         )
         r.raise_for_status()

@@ -41,8 +41,6 @@ class SyncEngine:
                     rows = self.db.upsert_product({
                         "name": prod.get("name", "Unnamed"),
                         "sku": sku,
-                        "squarespace_product_id": prod["id"],
-                        "squarespace_variant_id": variant["id"],
                         "description": prod.get("description", ""),
                     })
                     existing = rows[0] if rows else self.db.get_product_by_sku(sku)
@@ -55,16 +53,16 @@ class SyncEngine:
                     self.db.upsert_inventory({
                         "product_id": product_id,
                         "total_stock": stock_qty,
-                        "last_synced_at": datetime.now(timezone.utc).isoformat(),
                     })
-                    # Upsert pricing record for Squarespace
+                    # Upsert pricing record for Squarespace with platform IDs
                     price_val = variant.get("pricing", {}).get("basePrice", {}).get("value", "0")
                     self.db.upsert_price({
                         "product_id": product_id,
                         "platform": "squarespace",
                         "price": float(price_val),
                         "currency": "GBP",
-                        "sync_pending": False,
+                        "platform_product_id": prod["id"],
+                        "platform_variant_id": variant["id"],
                     })
 
         logger.info(f"Squarespace catalogue: {synced} new products, {len(ss_products)} total SS products")
@@ -83,7 +81,6 @@ class SyncEngine:
                 rows = self.db.upsert_product({
                     "name": name,
                     "sku": sku,
-                    "ebay_inventory_item_key": sku,
                     "description": item.get("product", {}).get("description", ""),
                 })
                 existing = rows[0] if rows else self.db.get_product_by_sku(sku)
@@ -97,9 +94,8 @@ class SyncEngine:
                 self.db.upsert_inventory({
                     "product_id": product_id,
                     "total_stock": stock_qty,
-                    "last_synced_at": datetime.now(timezone.utc).isoformat(),
                 })
-                # Upsert pricing record for eBay
+                # Upsert pricing record for eBay with platform IDs
                 try:
                     offers = self.ebay.get_offers_for_sku(sku)
                     if offers:
@@ -110,7 +106,7 @@ class SyncEngine:
                             "platform": "ebay",
                             "price": float(price_val),
                             "currency": "GBP",
-                            "sync_pending": False,
+                            "platform_product_id": sku,
                         })
                 except Exception as e:
                     logger.warning(f"Could not fetch eBay offers for SKU {sku}: {e}")
@@ -155,10 +151,12 @@ class SyncEngine:
                     "platform": "squarespace",
                     "platform_order_id": order_id,
                     "product_id": product["id"],
+                    "sku": sku,
                     "quantity": qty_sold,
-                    "sale_price": price,
+                    "unit_price": price,
                     "currency": "GBP",
-                    "sale_date": order.get("createdOn"),
+                    "status": order.get("fulfillmentStatus", "PENDING"),
+                    "ordered_at": order.get("createdOn"),
                     "customer_name": customer_name,
                     "customer_email": customer_email,
                     "shipping_address_line1": shipping.get("address1", ""),
@@ -181,15 +179,16 @@ class SyncEngine:
                         "id": inv["id"],
                         "product_id": product["id"],
                         "total_stock": new_stock,
-                        "last_synced_at": datetime.now(timezone.utc).isoformat(),
                     })
-                    # Push to eBay
-                    if product.get("ebay_inventory_item_key"):
-                        try:
-                            self.ebay.update_inventory_quantity(
-                                product["ebay_inventory_item_key"], new_stock)
-                        except Exception as e:
-                            logger.error(f"eBay stock update failed for {sku}: {e}")
+                    # Push to eBay — look up eBay platform IDs from platform_pricing
+                    ebay_pricing = self.db.get_platform_pricing_for_product(product["id"], "ebay")
+                    if ebay_pricing:
+                        ebay_sku = ebay_pricing[0].get("platform_product_id")
+                        if ebay_sku:
+                            try:
+                                self.ebay.update_inventory_quantity(ebay_sku, new_stock)
+                            except Exception as e:
+                                logger.error(f"eBay stock update failed for {sku}: {e}")
             processed += 1
         logger.info(f"SS orders processed: {processed}")
         return processed
@@ -223,10 +222,12 @@ class SyncEngine:
                     "platform": "ebay",
                     "platform_order_id": order_id,
                     "product_id": product["id"],
+                    "sku": sku,
                     "quantity": qty_sold,
-                    "sale_price": price,
+                    "unit_price": price,
                     "currency": "GBP",
-                    "sale_date": order.get("creationDate"),
+                    "status": order.get("orderFulfillmentStatus", "NOT_STARTED"),
+                    "ordered_at": order.get("creationDate"),
                     "customer_name": contact,
                     "customer_email": buyer_info.get("username", "") + "@ebay.com",
                     "shipping_address_line1": address.get("addressLine1", ""),
@@ -248,15 +249,16 @@ class SyncEngine:
                         "id": inv["id"],
                         "product_id": product["id"],
                         "total_stock": new_stock,
-                        "last_synced_at": datetime.now(timezone.utc).isoformat(),
                     })
-                    # Push to Squarespace
-                    if product.get("squarespace_variant_id"):
-                        try:
-                            self.ss.set_variant_stock(
-                                product["squarespace_variant_id"], new_stock)
-                        except Exception as e:
-                            logger.error(f"SS stock update failed for {sku}: {e}")
+                    # Push to Squarespace — look up SS platform IDs from platform_pricing
+                    ss_pricing = self.db.get_platform_pricing_for_product(product["id"], "squarespace")
+                    if ss_pricing:
+                        ss_variant_id = ss_pricing[0].get("platform_variant_id")
+                        if ss_variant_id:
+                            try:
+                                self.ss.set_variant_stock(ss_variant_id, new_stock)
+                            except Exception as e:
+                                logger.error(f"SS stock update failed for {sku}: {e}")
             processed += 1
         logger.info(f"eBay orders processed: {processed}")
         return processed
@@ -264,26 +266,22 @@ class SyncEngine:
     # ─── Price Sync ─────────────────────────────────────────────────────────
 
     def sync_pending_price_changes(self):
-        """Push any price changes (made in dashboard) to the actual platforms."""
+        """Push any price changes (where updated_at > last_synced_at) to the actual platforms."""
         pending = self.db.get_pending_price_changes()
         pushed = 0
         for row in pending:
-            prod = self.db.get_products()
-            prod_map = {p["id"]: p for p in prod}
-            product = prod_map.get(row["product_id"])
-            if not product:
-                continue
             try:
-                if row["platform"] == "squarespace" and product.get("squarespace_product_id"):
-                    self.ss.update_variant_price(
-                        product["squarespace_product_id"],
-                        product["squarespace_variant_id"],
-                        float(row["price"]),
-                    )
-                elif row["platform"] == "ebay" and product.get("ebay_inventory_item_key"):
-                    offers = self.ebay.get_offers_for_sku(product["ebay_inventory_item_key"])
-                    for offer in offers:
-                        self.ebay.update_offer_price(offer["offerId"], float(row["price"]))
+                if row["platform"] == "squarespace":
+                    pp_id = row.get("platform_product_id")
+                    pv_id = row.get("platform_variant_id")
+                    if pp_id and pv_id:
+                        self.ss.update_variant_price(pp_id, pv_id, float(row["price"]))
+                elif row["platform"] == "ebay":
+                    ebay_sku = row.get("platform_product_id")
+                    if ebay_sku:
+                        offers = self.ebay.get_offers_for_sku(ebay_sku)
+                        for offer in offers:
+                            self.ebay.update_offer_price(offer["offerId"], float(row["price"]))
                 self.db.mark_price_synced(row["id"])
                 pushed += 1
             except Exception as e:
@@ -294,31 +292,28 @@ class SyncEngine:
     # ─── Trend Snapshots ─────────────────────────────────────────────────────
 
     def update_daily_snapshots(self):
-        """Tally today's sales per product/platform and upsert into daily_snapshots."""
+        """Tally today's sales per product/platform and upsert into sales_trends."""
         today = datetime.now(timezone.utc).date().isoformat()
         orders = self.db.get_orders(limit=500)
         tally = {}  # (product_id, platform) → {units, revenue}
         for o in orders:
-            if not o.get("sale_date"):
+            if not o.get("ordered_at"):
                 continue
-            sale_day = o["sale_date"][:10]
+            sale_day = o["ordered_at"][:10]
             if sale_day != today:
                 continue
             key = (o["product_id"], o["platform"])
             if key not in tally:
                 tally[key] = {"units": 0, "revenue": 0.0}
             tally[key]["units"]   += o["quantity"]
-            tally[key]["revenue"] += float(o.get("sale_price", 0)) * o["quantity"]
+            tally[key]["revenue"] += float(o.get("unit_price", 0)) * o["quantity"]
         for (product_id, platform), vals in tally.items():
-            inv_rows = self.db.get_inventory(product_id)
-            stock = inv_rows[0]["total_stock"] if inv_rows else 0
             self.db.upsert_snapshot({
                 "product_id": product_id,
                 "date": today,
                 "platform": platform,
                 "units_sold": vals["units"],
                 "revenue": round(vals["revenue"], 2),
-                "ending_stock": stock,
             })
         logger.info(f"Daily snapshot updated: {len(tally)} product/platform entries")
 
