@@ -145,7 +145,6 @@ class SquarespaceClient:
                 "shipment": {
                     "trackingNumber": tracking_number,
                     "carrierName": carrier,
-                    "service": "Standard",
                 }
             }]
         }
