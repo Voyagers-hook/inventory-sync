@@ -177,7 +177,7 @@ class Database:
 
     def start_sync_log(self, sync_type: str) -> str:
         rows = self._rest("POST", "sync_log",
-                          payload={"sync_type": sync_type, "status": "running",
+                          payload={"sync_type": sync_type, "status": "started",
                                    "started_at": datetime.now(timezone.utc).isoformat()})
         return rows[0]["id"]
 

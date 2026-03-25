@@ -59,16 +59,16 @@ def main():
             items = engine.run_full_sync()
         elif args.mode == "quick":
             items = engine.run_quick_check()
-        status = "success"
+        status = "completed"
     except Exception as e:
         logger.exception("Sync failed with unhandled exception")
-        status = "error"
+        status = "failed"
         errors = str(e)
 
     db.finish_sync_log(log_id, status, items, errors)
     logger.info(f"Sync complete: {status}, {items} items processed")
 
-    if status == "error":
+    if status == "failed":
         sys.exit(1)
 
 
