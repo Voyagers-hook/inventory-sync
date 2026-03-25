@@ -89,6 +89,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const lowStock = inventory.filter(i => i.total_stock <= (i.low_stock_threshold || lowStockThreshold)).length;
     const unfulfilled = orders.filter(o => {
       const st = (o.fulfillment_status || 'PENDING').toUpperCase();
+      if (st === 'CANCELLED' || st === 'CANCELED') return false;
       return st === 'PENDING' || st === 'NOT_STARTED';
     });
     const sqRevenue = filteredOrders
