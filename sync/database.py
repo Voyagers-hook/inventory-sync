@@ -35,6 +35,21 @@ class Database:
     # ─── Settings (key-value) ────────────────────────────────────────────────
 
 
+    def ensure_schema(self):
+        """Apply any required schema migrations (idempotent)."""
+        try:
+            # Add tracking_pushed_at column if missing
+            r = requests.post(
+                f"{self.url}/rest/v1/rpc/exec_migration",
+                headers=self.headers,
+                json={},
+                timeout=5,
+            )
+        except Exception:
+            pass
+        # Alternative: just try to patch a dummy row to check the column exists
+        # We handle missing column gracefully in get_orders_needing_tracking_push
+
     def count_products(self):
         """Return total number of products in DB."""
         rows = self._rest("GET", "products", params={"select": "id"})
@@ -176,6 +191,34 @@ class Database:
         )
         r.raise_for_status()
 
+    def get_orders_needing_tracking_push(self):
+        """Return orders with tracking_number set but not yet pushed to the platform."""
+        try:
+            params = {
+                "select": "*",
+                "tracking_number": "not.is.null",
+                "tracking_pushed_at": "is.null",
+                "fulfillment_status": "eq.SHIPPED",
+            }
+            return self._rest("GET", "orders", params=params)
+        except Exception as e:
+            logger.warning(f"get_orders_needing_tracking_push failed: {e}")
+            return []
+
+    def mark_tracking_pushed(self, order_id: str):
+        """Mark an order's tracking as pushed to the platform."""
+        try:
+            r = requests.patch(
+                f"{self.url}/rest/v1/orders",
+                headers=self.headers,
+                params={"id": f"eq.{order_id}"},
+                json={"tracking_pushed_at": "now()"},
+                timeout=30,
+            )
+            r.raise_for_status()
+        except Exception as e:
+            logger.warning(f"mark_tracking_pushed failed for {order_id}: {e}")
+
     # ─── Sales Trends ────────────────────────────────────────────────────────
 
     def upsert_snapshot(self, snap: dict):
@@ -225,3 +268,4 @@ class Database:
 
     def clear_sync_request(self):
         self.set_setting("manual_sync_requested", "false")
+
