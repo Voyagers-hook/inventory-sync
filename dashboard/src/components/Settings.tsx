@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { Save, RefreshCw, Bell, Clock, Mail } from 'lucide-react';
 import type { Setting } from '../types';
-import { updateSetting } from '../utils/supabase';
+import { updateSetting, triggerQuickSync } from '../utils/supabase';
 
 interface SettingsProps {
   settings: Setting[];
@@ -39,9 +39,10 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onRefresh }) => {
     setSyncing(true);
     try {
       await updateSetting('manual_sync_requested', 'true');
-      showToast('Sync queued — will run in the next cycle.');
+      const triggered = await triggerQuickSync();
+      showToast(triggered ? '✓ Sync triggered — running now (~1 min)' : 'Sync queued — will run within the hour');
     } catch {
-      showToast('Failed to request sync');
+      showToast('Failed to trigger sync');
     } finally {
       setSyncing(false);
     }
@@ -76,7 +77,7 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onRefresh }) => {
           </div>
           <div className="bg-base-200 rounded-xl p-3 text-xs text-base-content/50">
             <p className="font-medium text-base-content/70 mb-1">How syncing works</p>
-            <p>GitHub Actions runs every hour for free (uses ~720 of 2,000 free minutes/month). Manual sync requests are picked up at the next cycle.</p>
+            <p>GitHub Actions runs every hour for free (unlimited on a public repo). Manual sync triggers the workflow immediately.</p>
           </div>
         </div>
       </div>
@@ -128,10 +129,10 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onRefresh }) => {
       {/* Manual Sync */}
       <div className="bg-base-100 rounded-xl border border-base-300 p-4 shadow-sm">
         <h3 className="text-sm font-semibold text-base-content mb-1">Manual Sync</h3>
-        <p className="text-xs text-base-content/40 mb-3">Trigger an immediate sync on the next GitHub Actions cycle</p>
+        <p className="text-xs text-base-content/40 mb-3">Triggers the sync workflow immediately — completes in ~1 minute</p>
         <button className="btn btn-secondary btn-sm gap-1.5" onClick={handleSyncNow} disabled={syncing}>
           <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
-          {syncing ? 'Queuing...' : 'Sync Now'}
+          {syncing ? 'Triggering...' : 'Sync Now'}
         </button>
       </div>
 
@@ -148,3 +149,4 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onRefresh }) => {
     </div>
   );
 };
+
