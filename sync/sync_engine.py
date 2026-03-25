@@ -321,13 +321,13 @@ class SyncEngine:
 
     def run_full_sync(self):
         since = self.db.get_setting("last_full_sync") or (
-            datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+            (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
         total = 0
         total += self.process_squarespace_orders(since)
         total += self.process_ebay_orders(since)
         total += self.sync_pending_price_changes()
         self.update_daily_snapshots()
-        self.db.set_setting("last_full_sync", datetime.now(timezone.utc).isoformat())
+        self.db.set_setting("last_full_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         return total
 
     def run_quick_check(self):
