@@ -1,11 +1,10 @@
-name: Quick Check (Manual Sync Flag)
+name: Quick Sync (On Demand)
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'  # Every 5 minutes — checks for manual sync request flag
+  workflow_dispatch:   # Only runs when triggered manually from the dashboard
 
 jobs:
-  quick-check:
+  quick-sync:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -19,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r sync/requirements.txt
 
-      - name: Quick check
+      - name: Quick sync
         working-directory: sync
         run: python main.py --mode quick
         env:
