@@ -143,6 +143,17 @@ class Database:
     def insert_order(self, order: dict):
         return self._rest("POST", "orders", payload=order)
 
+    def update_order_status(self, platform_order_id: str, status: str):
+        """Update the fulfillment_status of an order by platform_order_id."""
+        r = requests.patch(
+            f"{self.url}/rest/v1/orders",
+            headers=self.headers,
+            params={"platform_order_id": f"eq.{platform_order_id}"},
+            json={"fulfillment_status": status, "status": status},
+            timeout=30,
+        )
+        r.raise_for_status()
+
     def get_orders(self, platform: str = None, limit: int = 200):
         params = {"select": "*", "order": "ordered_at.desc", "limit": str(limit)}
         if platform:
