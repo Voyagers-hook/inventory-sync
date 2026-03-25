@@ -99,6 +99,14 @@ class Database:
             params["product_id"] = f"eq.{product_id}"
         return self._rest("GET", "inventory", params=params)
 
+    def get_products_needing_stock_sync(self):
+        """Return inventory rows updated since last stock sync push."""
+        last = self.get_setting("last_stock_sync_time") or "1970-01-01T00:00:00Z"
+        return self._rest("GET", "inventory", params={
+            "updated_at": f"gt.{last}",
+            "select": "*",
+        })
+
     def upsert_inventory(self, inv: dict):
         inv["updated_at"] = datetime.now(timezone.utc).isoformat()
         return self._rest("POST", "inventory", payload=inv,
