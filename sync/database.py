@@ -34,20 +34,7 @@ class Database:
 
     # ─── Settings (key-value) ────────────────────────────────────────────────
 
-    def ensure_schema(self):
-        """Apply any required schema migrations (idempotent)."""
-        try:
-            r = requests.post(
-                f"{self.url}/rest/v1/rpc/exec_migration",
-                headers=self.headers,
-                json={},
-                timeout=5,
-            )
-        except Exception:
-            pass
-
     def count_products(self):
-        """Return total number of products in DB."""
         rows = self._rest("GET", "products", params={"select": "id"})
         return len(rows)
 
@@ -58,6 +45,47 @@ class Database:
     def set_setting(self, key: str, value: str):
         self._rest("POST", "settings", payload={"key": key, "value": str(value)},
                    headers_extra={"Prefer": "resolution=merge-duplicates,return=representation"})
+
+    # ─── Stock Push Queue ────────────────────────────────────────────────────
+    # Each queued push is stored as a settings row: key=stock_push_{product_id}, value=new_stock_int
+    # This means only EXPLICITLY changed products ever get pushed to platforms.
+
+    def queue_stock_push(self, product_id: str, new_stock: int):
+        """Queue a stock push for a product. Called after any stock change."""
+        self.set_setting(f"stock_push_{product_id}", str(new_stock))
+        logger.info(f"Queued stock push for product {product_id} → {new_stock}")
+
+    def get_stock_push_queue(self):
+        """Return list of {product_id, stock} for all queued stock pushes."""
+        try:
+            rows = self._rest("GET", "settings", params={
+                "key": "like.stock_push_%",
+                "select": "key,value",
+            })
+            result = []
+            for r in rows:
+                product_id = r["key"][len("stock_push_"):]
+                try:
+                    result.append({"product_id": product_id, "stock": int(r["value"])})
+                except (ValueError, TypeError):
+                    pass
+            return result
+        except Exception as e:
+            logger.warning(f"get_stock_push_queue failed: {e}")
+            return []
+
+    def clear_stock_push(self, product_id: str):
+        """Remove a product from the stock push queue after successful push."""
+        try:
+            r = requests.delete(
+                f"{self.url}/rest/v1/settings",
+                headers={k: v for k, v in self.headers.items() if k != "Prefer"},
+                params={"key": f"eq.stock_push_{product_id}"},
+                timeout=30,
+            )
+            r.raise_for_status()
+        except Exception as e:
+            logger.warning(f"clear_stock_push failed for {product_id}: {e}")
 
     # ─── Products ────────────────────────────────────────────────────────────
 
@@ -98,14 +126,6 @@ class Database:
         if product_id:
             params["product_id"] = f"eq.{product_id}"
         return self._rest("GET", "inventory", params=params)
-
-    def get_products_needing_stock_sync(self):
-        """Return inventory rows updated since last stock sync push."""
-        last = self.get_setting("last_stock_sync_time") or "1970-01-01T00:00:00Z"
-        return self._rest("GET", "inventory", params={
-            "updated_at": f"gt.{last}",
-            "select": "*",
-        })
 
     def upsert_inventory(self, inv: dict):
         inv["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -158,7 +178,6 @@ class Database:
         return self._rest("POST", "orders", payload=order)
 
     def update_order_status(self, platform_order_id: str, status: str):
-        """Update the fulfillment_status of an order by platform_order_id."""
         r = requests.patch(
             f"{self.url}/rest/v1/orders",
             headers=self.headers,
@@ -189,7 +208,6 @@ class Database:
         r.raise_for_status()
 
     def get_orders_needing_tracking_push(self):
-        """Return SHIPPED orders with a tracking_number (these need pushing to platform)."""
         try:
             params = {
                 "select": "*",
@@ -202,7 +220,6 @@ class Database:
             return []
 
     def mark_tracking_pushed(self, order_id: str):
-        """Mark order as having had its tracking pushed to the platform (status = TRACKING_PUSHED)."""
         try:
             r = requests.patch(
                 f"{self.url}/rest/v1/orders",
@@ -218,9 +235,7 @@ class Database:
     # ─── Sales Trends ────────────────────────────────────────────────────────
 
     def upsert_snapshot(self, snap: dict):
-        """Upsert a daily snapshot using delete-then-insert to avoid constraint issues."""
         snap["updated_at"] = datetime.now(timezone.utc).isoformat()
-        # Delete any existing row for this exact date/product/platform combination
         try:
             params = {
                 "date": f"eq.{snap['date']}",
