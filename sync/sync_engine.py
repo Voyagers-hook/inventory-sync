@@ -308,6 +308,59 @@ class SyncEngine:
             })
         logger.info(f"Daily snapshot updated: {len(tally)} product/platform entries")
 
+    # ─── Stock Push ──────────────────────────────────────────────────────────
+
+    def sync_pending_stock_changes(self):
+        """Push stock levels to both platforms for any product whose inventory was updated.
+
+        Triggered by: merges, manual stock edits, or order-driven stock deductions.
+        Uses last_stock_sync_time setting as a watermark so only changed products are pushed.
+        On first ever run, looks back 24 hours to catch recent merges/edits.
+        """
+        # Initialise watermark if never set — look back 24 hours to catch today's merges
+        if not self.db.get_setting("last_stock_sync_time"):
+            yesterday = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            self.db.set_setting("last_stock_sync_time", yesterday)
+            logger.info("Stock sync watermark initialised (looking back 24 hours)")
+
+        inv_rows = self.db.get_products_needing_stock_sync()
+        if not inv_rows:
+            logger.info("Stock sync: no pending changes")
+            self.db.set_setting("last_stock_sync_time", datetime.now(timezone.utc).isoformat())
+            return 0
+
+        logger.info(f"Stock sync: {len(inv_rows)} product(s) need pushing to platforms")
+        pushed = 0
+        for inv in inv_rows:
+            product_id = inv["product_id"]
+            new_stock = inv["total_stock"]
+
+            # Push to eBay
+            for ep in self.db.get_platform_pricing_for_product(product_id, "ebay"):
+                item_id = ep.get("platform_product_id")
+                if item_id:
+                    try:
+                        self.ebay.update_inventory_quantity(item_id, new_stock)
+                        pushed += 1
+                        logger.info(f"Stock → eBay {item_id}: {new_stock}")
+                    except Exception as e:
+                        logger.error(f"eBay stock push failed {item_id}: {e}")
+
+            # Push to Squarespace
+            for sp in self.db.get_platform_pricing_for_product(product_id, "squarespace"):
+                variant_id = sp.get("platform_variant_id")
+                if variant_id:
+                    try:
+                        self.ss.set_variant_stock(variant_id, new_stock)
+                        pushed += 1
+                        logger.info(f"Stock → SS variant {variant_id}: {new_stock}")
+                    except Exception as e:
+                        logger.error(f"SS stock push failed {variant_id}: {e}")
+
+        self.db.set_setting("last_stock_sync_time", datetime.now(timezone.utc).isoformat())
+        logger.info(f"Stock sync complete: {pushed} platform update(s) for {len(inv_rows)} product(s)")
+        return pushed
+
     # ─── Full Sync ───────────────────────────────────────────────────────────
 
     def run_full_sync(self):
@@ -325,8 +378,9 @@ class SyncEngine:
 
         total += self.process_squarespace_orders(since)
         total += self.process_ebay_orders(since)
+        total += self.sync_pending_stock_changes()   # Push any stock changes to both platforms
         total += self.sync_pending_price_changes()
-        total += self.push_pending_tracking()  # Push any pending tracking on every sync
+        total += self.push_pending_tracking()        # Push any pending tracking on every sync
         self.update_daily_snapshots()
         self.db.set_setting("last_full_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         return total
