@@ -3,6 +3,7 @@ Squarespace Commerce API client.
 Handles products, inventory, orders and price updates.
 """
 import os
+import uuid
 import requests
 import logging
 from datetime import datetime, timezone
@@ -26,10 +27,11 @@ class SquarespaceClient:
         r.raise_for_status()
         return r.json()
 
-    def _post(self, path, payload):
-        r = requests.post(f"{BASE_URL}{path}", headers=self.headers, json=payload, timeout=30)
+    def _post(self, path, payload, extra_headers=None):
+        h = {**self.headers, **(extra_headers or {})}
+        r = requests.post(f"{BASE_URL}{path}", headers=h, json=payload, timeout=30)
         r.raise_for_status()
-        return r.json()
+        return r
 
     # ─── Products ───────────────────────────────────────────────────────────────
 
@@ -61,77 +63,54 @@ class SquarespaceClient:
             cursor = pagination.get("nextPageCursor")
         return inventory
 
-    def get_all_inventory_map(self) -> dict:
-        """Fetch ALL inventory pages and return {variantId: quantity} dict.
-        Used for efficient bulk stock sync — call this once, then look up variants locally.
+    def set_variant_stocks(self, variant_updates: list) -> int:
+        """Set exact stock levels for one or more variants.
+
+        variant_updates: list of {"variantId": str, "quantity": int}
+
+        Uses the Squarespace Inventory Adjustments API with setFiniteOperations.
+        Requires Idempotency-Key header. Max 50 variants per call.
+        Returns number of variants updated.
         """
-        inv_map = {}
-        cursor = None
-        while True:
-            params = {}
-            if cursor:
-                params["cursor"] = cursor
-            data = self._get("/commerce/inventory", params)
-            for item in data.get("inventory", []):
-                vid = item.get("variantId")
-                if vid:
-                    inv_map[vid] = item.get("quantity", 0)
-            pagination = data.get("pagination", {})
-            if not pagination.get("hasNextPage"):
-                break
-            cursor = pagination.get("nextPageCursor")
-        logger.info(f"SS inventory map built: {len(inv_map)} variants")
-        return inv_map
-
-    def set_multiple_variant_stocks(self, updates: list, inventory_map: dict = None) -> int:
-        """Batch update stock levels for multiple variants in a single API call.
-
-        updates: list of {"variant_id": str, "new_qty": int}
-        inventory_map: optional pre-fetched {variantId: qty} dict (fetched here if not provided)
-
-        Returns number of variants actually adjusted.
-        """
-        if not updates:
+        if not variant_updates:
             return 0
-        if inventory_map is None:
-            inventory_map = self.get_all_inventory_map()
-        adjustments = []
-        for upd in updates:
-            vid = upd["variant_id"]
-            new_qty = upd["new_qty"]
-            current_qty = inventory_map.get(vid, 0)
-            delta = new_qty - current_qty
-            if delta != 0:
-                adjustments.append({"variantId": vid, "quantityDelta": delta})
-                logger.info(f"SS stock queued: variant {vid} {current_qty} → {new_qty} (delta {delta:+d})")
-        if adjustments:
-            payload = {"adjustments": adjustments}
-            self._post("/commerce/inventory/adjustments", payload)
-            logger.info(f"SS batch stock update sent: {len(adjustments)} variants adjusted")
-        else:
-            logger.info("SS batch stock update: all variants already at correct levels")
-        return len(adjustments)
 
-    def set_variant_stock(self, variant_id: str, new_qty: int, inventory_map: dict = None):
-        """Set absolute stock level for a single variant.
-        Pass inventory_map if you already have it (avoids re-fetching all inventory).
-        """
-        if inventory_map is None:
-            inventory_map = self.get_all_inventory_map()
-        current_qty = inventory_map.get(variant_id, 0)
-        delta = new_qty - current_qty
-        if delta == 0:
-            logger.info(f"SS stock unchanged for variant {variant_id}")
-            return
-        payload = {"adjustments": [{"variantId": variant_id, "quantityDelta": delta}]}
-        self._post("/commerce/inventory/adjustments", payload)
-        logger.info(f"SS stock adjusted variant {variant_id}: {current_qty} → {new_qty} (delta {delta:+d})")
+        total = 0
+        # Process in batches of 50 (SS API limit)
+        for i in range(0, len(variant_updates), 50):
+            batch = variant_updates[i:i+50]
+            payload = {
+                "setFiniteOperations": [
+                    {"variantId": upd["variantId"], "quantity": max(0, int(upd["quantity"]))}
+                    for upd in batch
+                ]
+            }
+            idempotency_key = str(uuid.uuid4())
+            r = self._post(
+                "/commerce/inventory/adjustments",
+                payload,
+                extra_headers={"Idempotency-Key": idempotency_key}
+            )
+            # 204 = success, no body
+            total += len(batch)
+            logger.info(f"SS stock set for {len(batch)} variant(s) (batch {i//50 + 1})")
+
+        return total
+
+    def set_variant_stock(self, variant_id: str, new_qty: int) -> bool:
+        """Set exact stock level for a single variant."""
+        try:
+            self.set_variant_stocks([{"variantId": variant_id, "quantity": new_qty}])
+            logger.info(f"SS stock set: variant {variant_id} → {new_qty}")
+            return True
+        except Exception as e:
+            logger.error(f"SS stock set failed for variant {variant_id}: {e}")
+            return False
 
     # ─── Orders ─────────────────────────────────────────────────────────────────
 
     def get_orders(self, modified_after: str = None):
-        """Return all orders, optionally filtered by date range.
-        Squarespace requires both modifiedAfter AND modifiedBefore together."""
+        """Return all orders, optionally filtered by date range."""
         from datetime import datetime, timezone
         orders, cursor = [], None
         while True:
@@ -169,12 +148,11 @@ class SquarespaceClient:
 
     def update_order_fulfillment(self, order_id: str, tracking_number: str, carrier: str):
         """Mark a Squarespace order as shipped with tracking info.
-        
-        Uses the correct Squarespace Commerce API format:
-        POST /commerce/orders/{id}/fulfillments with a top-level "shipments" array.
+
+        Uses correct Squarespace Commerce API format:
+        POST /commerce/orders/{id}/fulfillments with top-level "shipments" array.
         Required fields: shipDate, carrierName, service, trackingNumber.
         """
-        from datetime import datetime, timezone
         payload = {
             "shouldSendNotification": True,
             "shipments": [{
