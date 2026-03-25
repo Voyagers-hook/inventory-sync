@@ -181,12 +181,11 @@ class Database:
         r.raise_for_status()
 
     def get_orders_needing_tracking_push(self):
-        """Return orders with tracking_number set but not yet pushed to the platform."""
+        """Return SHIPPED orders with a tracking_number (these need pushing to platform)."""
         try:
             params = {
                 "select": "*",
                 "tracking_number": "not.is.null",
-                "tracking_pushed_at": "is.null",
                 "fulfillment_status": "eq.SHIPPED",
             }
             return self._rest("GET", "orders", params=params)
@@ -195,12 +194,13 @@ class Database:
             return []
 
     def mark_tracking_pushed(self, order_id: str):
+        """Mark order as having had its tracking pushed to the platform (status = TRACKING_PUSHED)."""
         try:
             r = requests.patch(
                 f"{self.url}/rest/v1/orders",
                 headers=self.headers,
                 params={"id": f"eq.{order_id}"},
-                json={"tracking_pushed_at": datetime.now(timezone.utc).isoformat()},
+                json={"fulfillment_status": "TRACKING_PUSHED", "status": "TRACKING_PUSHED"},
                 timeout=30,
             )
             r.raise_for_status()
