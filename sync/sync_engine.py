@@ -17,15 +17,11 @@ class SyncEngine:
     # ─── Product Catalogue Sync ──────────────────────────────────────────────
 
     def sync_product_catalogue(self):
-        """Full initial import: pull ALL products from both Squarespace and eBay,
-        create product records, inventory records, and pricing records."""
+        """Full initial import: pull ALL products from both Squarespace and eBay."""
         logger.info("Syncing product catalogue from both platforms...")
         synced = 0
 
-        # ── Squarespace Products ──────────────────────────────────────────
         ss_products = self.ss.get_products()
-
-        # Build inventory lookup: variantId → quantity
         ss_inventory_raw = self.ss.get_inventory()
         ss_stock_map = {}
         for inv_item in ss_inventory_raw:
@@ -45,16 +41,10 @@ class SyncEngine:
                     })
                     existing = rows[0] if rows else self.db.get_product_by_sku(sku)
                     synced += 1
-
                 if existing:
                     product_id = existing["id"]
-                    # Upsert inventory record
                     stock_qty = ss_stock_map.get(variant["id"], 0)
-                    self.db.upsert_inventory({
-                        "product_id": product_id,
-                        "total_stock": stock_qty,
-                    })
-                    # Upsert pricing record for Squarespace with platform IDs
+                    self.db.upsert_inventory({"product_id": product_id, "total_stock": stock_qty})
                     price_val = variant.get("pricing", {}).get("basePrice", {}).get("value", "0")
                     self.db.upsert_price({
                         "product_id": product_id,
@@ -65,12 +55,10 @@ class SyncEngine:
                         "platform_variant_id": variant["id"],
                     })
 
-        logger.info(f"Squarespace catalogue: {synced} new products, {len(ss_products)} total SS products")
+        logger.info(f"Squarespace catalogue: {synced} new products, {len(ss_products)} total")
 
-        # ── eBay Products ─────────────────────────────────────────────────
         ebay_items = self.ebay.get_inventory_items()
         ebay_synced = 0
-
         for item in ebay_items:
             sku = item.get("sku")
             if not sku:
@@ -85,19 +73,11 @@ class SyncEngine:
                 })
                 existing = rows[0] if rows else self.db.get_product_by_sku(sku)
                 ebay_synced += 1
-
             if existing:
                 product_id = existing["id"]
-                # Upsert inventory record
                 stock_qty = item.get("availability", {}).get(
                     "shipToLocationAvailability", {}).get("quantity", 0)
-                self.db.upsert_inventory({
-                    "product_id": product_id,
-                    "total_stock": stock_qty,
-                })
-                # Upsert pricing record for eBay
-                # item["item_id"] is the raw eBay ItemID needed for ReviseItem/ReviseInventoryStatus
-                # item["price"] comes directly from GetMyeBaySelling (BuyItNowPrice)
+                self.db.upsert_inventory({"product_id": product_id, "total_stock": stock_qty})
                 ebay_item_id = item.get("item_id", sku)
                 price_val = item.get("price", 0.0)
                 self.db.upsert_price({
@@ -108,9 +88,9 @@ class SyncEngine:
                     "platform_product_id": ebay_item_id,
                 })
 
-        logger.info(f"eBay catalogue: {ebay_synced} new products, {len(ebay_items)} total eBay items")
+        logger.info(f"eBay catalogue: {ebay_synced} new products, {len(ebay_items)} total")
         total_synced = synced + ebay_synced
-        logger.info(f"Catalogue sync complete: {total_synced} new products added across both platforms")
+        logger.info(f"Catalogue sync complete: {total_synced} new products added")
         return total_synced
 
     # ─── Order Processing ────────────────────────────────────────────────────
@@ -122,12 +102,16 @@ class SyncEngine:
         processed = 0
         for order in orders:
             order_id = order.get("id")
+            status = order.get("fulfillmentStatus", "PENDING")
+
+            # Update status for already-imported orders
             if self.db.order_exists("squarespace", order_id):
-                continue
-            if order.get("fulfillmentStatus") not in ("PENDING", "FULFILLED"):
+                self.db.update_order_status(order_id, status)
                 continue
 
-            # Extract customer info
+            if status not in ("PENDING", "FULFILLED"):
+                continue
+
             billing = order.get("billingAddress", {})
             shipping = order.get("shippingAddress", {}) or billing
             customer_name = f"{shipping.get('firstName', '')} {shipping.get('lastName', '')}".strip()
@@ -138,12 +122,10 @@ class SyncEngine:
                 qty_sold   = int(line.get("quantity", 1))
                 sku        = line.get("sku") or f"SS-{line.get('productId')}-{variant_id}"
                 price      = float(line.get("unitPricePaid", {}).get("value", 0))
-                # Find product in our DB
-                product = self.db.get_product_by_sku(sku)
+                product    = self.db.get_product_by_sku(sku)
                 if not product:
                     logger.warning(f"SKU {sku} not in DB, skipping")
                     continue
-                # Record sale with customer details
                 self.db.insert_order({
                     "platform": "squarespace",
                     "platform_order_id": order_id,
@@ -152,7 +134,7 @@ class SyncEngine:
                     "quantity": qty_sold,
                     "unit_price": price,
                     "currency": "GBP",
-                    "status": order.get("fulfillmentStatus", "PENDING"),
+                    "status": status,
                     "ordered_at": order.get("createdOn"),
                     "customer_name": customer_name,
                     "customer_email": customer_email,
@@ -162,22 +144,16 @@ class SyncEngine:
                     "shipping_county": shipping.get("state", ""),
                     "shipping_postcode": shipping.get("postalCode", ""),
                     "shipping_country": shipping.get("countryCode", ""),
-                    "fulfillment_status": order.get("fulfillmentStatus", "PENDING"),
+                    "fulfillment_status": status,
                     "order_total": float(order.get("grandTotal", {}).get("value", 0)),
                     "item_name": line.get("productName", ""),
                     "order_number": order.get("orderNumber", ""),
                 })
-                # Update DB inventory
                 inv_rows = self.db.get_inventory(product["id"])
                 if inv_rows:
                     inv = inv_rows[0]
                     new_stock = max(0, inv["total_stock"] - qty_sold)
-                    self.db.upsert_inventory({
-                        "id": inv["id"],
-                        "product_id": product["id"],
-                        "total_stock": new_stock,
-                    })
-                    # Push to eBay — look up eBay platform IDs from platform_pricing
+                    self.db.upsert_inventory({"id": inv["id"], "product_id": product["id"], "total_stock": new_stock})
                     ebay_pricing = self.db.get_platform_pricing_for_product(product["id"], "ebay")
                     if ebay_pricing:
                         ebay_sku = ebay_pricing[0].get("platform_product_id")
@@ -191,34 +167,37 @@ class SyncEngine:
         return processed
 
     def process_ebay_orders(self, since: str = None):
-        """Process new eBay orders → deduct stock → push updated qty to Squarespace."""
-        logger.info(f"Processing eBay orders since {since}")
-        orders = self.ebay.get_orders(created_after=since)
+        """Process new eBay orders + reconcile statuses for last 90 days.
+        Always looks back 90 days so fulfilled/cancelled orders get their status updated.
+        """
+        # Always look back 90 days for full status reconciliation
+        reconcile_since = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        logger.info(f"Processing eBay orders (new since {since or 'start'}, reconciling last 90 days)")
+        orders = self.ebay.get_orders(created_after=reconcile_since)
         processed = 0
 
-        # ── Reconcile: update statuses for all already-imported orders ──
+        # ── Pass 1: Reconcile statuses of all already-imported orders ──
         for order in orders:
             order_id = order.get("orderId")
-            if self.db.order_exists("ebay", order_id):
-                cancel_state = order.get("cancelStatus", {}).get("cancelState", "NONE_REQUESTED")
-                if cancel_state == "CANCELLED":
-                    self.db.update_order_status(order_id, "CANCELLED")
-                    logger.info(f"Marked eBay order {order_id} as CANCELLED")
-                else:
-                    # Sync latest fulfillment status (catches FULFILLED orders)
-                    ebay_status = order.get("orderFulfillmentStatus", "NOT_STARTED")
-                    self.db.update_order_status(order_id, ebay_status)
+            if not self.db.order_exists("ebay", order_id):
+                continue
+            cancel_state = order.get("cancelStatus", {}).get("cancelState", "NONE_REQUESTED")
+            if cancel_state == "CANCELLED":
+                self.db.update_order_status(order_id, "CANCELLED")
+                logger.info(f"Reconciled eBay order {order_id} → CANCELLED")
+            else:
+                ebay_status = order.get("orderFulfillmentStatus", "NOT_STARTED")
+                self.db.update_order_status(order_id, ebay_status)
 
+        # ── Pass 2: Import any new orders not yet in DB ──
         for order in orders:
             order_id = order.get("orderId")
-            # Skip cancelled orders entirely
             cancel_state = order.get("cancelStatus", {}).get("cancelState", "NONE_REQUESTED")
             if cancel_state == "CANCELLED":
                 continue
             if self.db.order_exists("ebay", order_id):
                 continue
 
-            # Extract customer info
             ship_to = order.get("fulfillmentStartInstructions", [{}])[0].get(
                 "shippingStep", {}).get("shipTo", {})
             contact = ship_to.get("fullName", "")
@@ -260,12 +239,7 @@ class SyncEngine:
                 if inv_rows:
                     inv = inv_rows[0]
                     new_stock = max(0, inv["total_stock"] - qty_sold)
-                    self.db.upsert_inventory({
-                        "id": inv["id"],
-                        "product_id": product["id"],
-                        "total_stock": new_stock,
-                    })
-                    # Push to Squarespace — look up SS platform IDs from platform_pricing
+                    self.db.upsert_inventory({"id": inv["id"], "product_id": product["id"], "total_stock": new_stock})
                     ss_pricing = self.db.get_platform_pricing_for_product(product["id"], "squarespace")
                     if ss_pricing:
                         ss_variant_id = ss_pricing[0].get("platform_variant_id")
@@ -275,13 +249,13 @@ class SyncEngine:
                             except Exception as e:
                                 logger.error(f"SS stock update failed for {sku}: {e}")
             processed += 1
-        logger.info(f"eBay orders processed: {processed}")
+
+        logger.info(f"eBay orders processed: {processed} new, statuses reconciled for all 90-day orders")
         return processed
 
     # ─── Price Sync ─────────────────────────────────────────────────────────
 
     def sync_pending_price_changes(self):
-        """Push any price changes (where updated_at > last_synced_at) to the actual platforms."""
         pending = self.db.get_pending_price_changes()
         pushed = 0
         for row in pending:
@@ -292,7 +266,6 @@ class SyncEngine:
                     if pp_id and pv_id:
                         self.ss.update_variant_price(pp_id, pv_id, float(row["price"]))
                 elif row["platform"] == "ebay":
-                    # platform_product_id stores the eBay ItemID for traditional listings
                     ebay_item_id = row.get("platform_product_id")
                     if ebay_item_id:
                         self.ebay.update_offer_price(ebay_item_id, float(row["price"]))
@@ -309,10 +282,12 @@ class SyncEngine:
         """Tally today's sales per product/platform and upsert into sales_trends."""
         today = datetime.now(timezone.utc).date().isoformat()
         orders = self.db.get_orders(limit=500)
-        tally = {}  # (product_id, platform) → {units, revenue}
+        tally = {}
         for o in orders:
             if not o.get("ordered_at"):
                 continue
+            if not o.get("product_id"):
+                continue  # skip orders without a matched product
             sale_day = o["ordered_at"][:10]
             if sale_day != today:
                 continue
@@ -335,7 +310,6 @@ class SyncEngine:
 
     def run_full_sync(self):
         total = 0
-        # On first run (no products in DB), do a full catalogue import first
         product_count = self.db.count_products()
         if product_count == 0:
             logger.info("No products in DB — running initial catalogue import...")
@@ -345,12 +319,12 @@ class SyncEngine:
         if last:
             since = last
         else:
-            # First run: look back 90 days for orders
             since = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         total += self.process_squarespace_orders(since)
         total += self.process_ebay_orders(since)
         total += self.sync_pending_price_changes()
+        total += self.push_pending_tracking()  # Push any pending tracking on every sync
         self.update_daily_snapshots()
         self.db.set_setting("last_full_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         return total
@@ -390,14 +364,11 @@ class SyncEngine:
     def run_quick_check(self):
         """Triggered on demand: push any pending tracking, then full sync if requested."""
         count = 0
-
-        # Always push any pending tracking numbers immediately
         pushed = self.push_pending_tracking()
         if pushed:
             logger.info(f"Quick check: pushed {pushed} tracking number(s) to platforms")
             count += pushed
 
-        # Run full sync if manually requested from dashboard
         if self.db.is_sync_requested():
             logger.info("Quick check: manual sync requested, running full sync...")
             self.db.clear_sync_request()
@@ -406,4 +377,3 @@ class SyncEngine:
             logger.info("Quick check: no manual sync requested")
 
         return count
-
