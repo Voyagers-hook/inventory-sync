@@ -1,18 +1,24 @@
 """
-eBay REST API client.
-Uses Sell Inventory API and Sell Fulfillment API.
+eBay API client.
+Uses:
+  - Trading API (XML) for listing inventory (GetMyeBaySelling)
+  - Sell Fulfillment API (REST) for orders and tracking
 Handles OAuth2 token refresh automatically.
 """
 import os
 import base64
 import requests
 import logging
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
-BASE_URL     = "https://api.ebay.com"
-TOKEN_URL    = "https://api.ebay.com/identity/v1/oauth2/token"
+BASE_URL  = "https://api.ebay.com"
+TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token"
+TRADING_URL = "https://api.ebay.com/ws/api.dll"
+NS = "urn:ebay:apis:eBLBaseComponents"
+
 SCOPES = (
     "https://api.ebay.com/oauth/api_scope/sell.inventory "
     "https://api.ebay.com/oauth/api_scope/sell.fulfillment"
@@ -23,8 +29,9 @@ class EbayClient:
     def __init__(self, db=None):
         self.app_id      = os.environ["EBAY_APP_ID"]
         self.cert_id     = os.environ["EBAY_CERT_ID"]
+        self.dev_id      = os.environ.get("EBAY_DEV_ID", "cd505b42-9374-4d5c-86a5-1e31f075a2f1")
         self.refresh_tok = os.environ["EBAY_REFRESH_TOKEN"]
-        self.db = db  # optional DB reference to cache access token
+        self.db = db
         self._access_token = None
         self._token_expiry = None
 
@@ -51,13 +58,11 @@ class EbayClient:
         expires_in = int(resp.get("expires_in", 7200))
         self._token_expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 120)
         logger.info("eBay access token refreshed, valid for ~2h")
-        # Persist expiry in DB so other runs can reuse
         if self.db:
             self.db.set_setting("ebay_access_token", self._access_token)
             self.db.set_setting("ebay_token_expiry", self._token_expiry.isoformat())
 
     def _get_access_token(self):
-        # Try cached from DB first
         if self.db and not self._access_token:
             tok   = self.db.get_setting("ebay_access_token")
             exp_s = self.db.get_setting("ebay_token_expiry")
@@ -66,97 +71,144 @@ class EbayClient:
                 if expiry > datetime.now(timezone.utc):
                     self._access_token = tok
                     self._token_expiry = expiry
-        # Refresh if missing or near expiry
         if not self._access_token or (self._token_expiry and datetime.now(timezone.utc) >= self._token_expiry):
             self._fetch_new_access_token()
         return self._access_token
 
-    def _headers(self):
+    def _rest_headers(self):
         return {
             "Authorization": f"Bearer {self._get_access_token()}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
 
-    # ─── Inventory ──────────────────────────────────────────────────────────────
+    def _trading_headers(self, call_name):
+        return {
+            "X-EBAY-API-CALL-NAME": call_name,
+            "X-EBAY-API-APP-NAME": self.app_id,
+            "X-EBAY-API-DEV-NAME": self.dev_id,
+            "X-EBAY-API-CERT-NAME": self.cert_id,
+            "X-EBAY-API-SITEID": "3",  # UK site
+            "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
+            "Content-Type": "text/xml",
+            "X-EBAY-API-IAF-TOKEN": self._get_access_token(),
+        }
+
+    def _trading_call(self, call_name, xml_body):
+        r = requests.post(TRADING_URL,
+            headers=self._trading_headers(call_name),
+            data=xml_body, timeout=60)
+        r.raise_for_status()
+        return ET.fromstring(r.text)
+
+    # ─── Inventory (Trading API) ─────────────────────────────────────────────
 
     def get_inventory_items(self):
-        """Return all inventory items (all pages)."""
-        items, offset, limit = [], 0, 100
-        while True:
-            r = requests.get(
-                f"{BASE_URL}/sell/inventory/v1/inventory_item",
-                headers=self._headers(),
-                params={"limit": limit, "offset": offset},
-                timeout=30,
-            )
-            r.raise_for_status()
-            data = r.json()
-            items.extend(data.get("inventoryItems", []))
-            total = data.get("total", 0)
-            offset += limit
-            if offset >= total:
-                break
-        return items
+        """Return all active eBay listings via Trading API (GetMyeBaySelling).
+        Returns list of dicts with: sku, item_id, title, price, qty, image_url
+        """
+        all_items = []
+        page = 1
+        total_pages = 1
+
+        while page <= total_pages:
+            xml = f'''<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <ActiveList>
+    <Include>true</Include>
+    <Pagination>
+      <EntriesPerPage>200</EntriesPerPage>
+      <PageNumber>{page}</PageNumber>
+    </Pagination>
+  </ActiveList>
+</GetMyeBaySellingRequest>'''
+            root = self._trading_call("GetMyeBaySelling", xml)
+
+            # Get total pages from response
+            tp_el = root.find(f'.//{{{NS}}}TotalNumberOfPages')
+            if tp_el is not None and tp_el.text:
+                total_pages = int(tp_el.text)
+
+            items = root.findall(f'.//{{{NS}}}Item')
+            for item in items:
+                def g(tag):
+                    el = item.find(f'{{{NS}}}{tag}')
+                    return el.text if el is not None else None
+
+                item_id = g('ItemID')
+                title = g('Title')
+                price_el = item.find(f'{{{NS}}}BuyItNowPrice')
+                price = float(price_el.text) if price_el is not None else 0.0
+                qty_str = g('QuantityAvailable') or g('Quantity')
+                qty = int(qty_str) if qty_str else 0
+                img_el = item.find(f'{{{NS}}}PictureDetails/{{{NS}}}GalleryURL')
+                img = img_el.text if img_el is not None else None
+
+                # Use "EBAY-{itemId}" as the canonical SKU for traditional listings
+                sku = f"EBAY-{item_id}"
+
+                all_items.append({
+                    "sku": sku,
+                    "item_id": item_id,
+                    "product": {"title": title},
+                    "availability": {
+                        "shipToLocationAvailability": {"quantity": qty}
+                    },
+                    "price": price,
+                    "image_url": img,
+                })
+
+            logger.info(f"eBay listings page {page}/{total_pages}: {len(items)} items")
+            page += 1
+
+        logger.info(f"eBay GetMyeBaySelling: {len(all_items)} active listings")
+        return all_items
 
     def get_inventory_item(self, sku: str):
-        """Get a single inventory item by SKU."""
-        r = requests.get(
-            f"{BASE_URL}/sell/inventory/v1/inventory_item/{sku}",
-            headers=self._headers(), timeout=30,
-        )
-        if r.status_code == 404:
-            return None
-        r.raise_for_status()
-        return r.json()
+        """Not used with Trading API flow — kept for compatibility."""
+        return None
 
-    def update_inventory_quantity(self, sku: str, quantity: int):
-        """Update only the availability quantity of an existing inventory item."""
-        existing = self.get_inventory_item(sku)
-        if not existing:
-            logger.warning(f"eBay SKU {sku} not found, skipping stock update")
-            return
-        # Merge new quantity into existing object
-        existing.setdefault("availability", {})
-        existing["availability"]["shipToLocationAvailability"] = {
-            "quantity": max(0, quantity)
-        }
-        r = requests.put(
-            f"{BASE_URL}/sell/inventory/v1/inventory_item/{sku}",
-            headers=self._headers(), json=existing, timeout=30,
-        )
-        r.raise_for_status()
-        logger.info(f"eBay stock updated SKU {sku} → {quantity}")
+    def update_inventory_quantity(self, item_id: str, quantity: int):
+        """Update stock quantity for a traditional eBay listing via ReviseInventoryStatus."""
+        xml = f'''<?xml version="1.0" encoding="utf-8"?>
+<ReviseInventoryStatusRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <InventoryStatus>
+    <ItemID>{item_id}</ItemID>
+    <Quantity>{max(0, quantity)}</Quantity>
+  </InventoryStatus>
+</ReviseInventoryStatusRequest>'''
+        root = self._trading_call("ReviseInventoryStatus", xml)
+        ack = root.find(f'{{{NS}}}Ack')
+        if ack is not None and ack.text in ('Success', 'Warning'):
+            logger.info(f"eBay stock updated item {item_id} → {quantity}")
+        else:
+            errors = root.findall(f'.//{{{NS}}}Errors/{{{NS}}}LongMessage')
+            msg = "; ".join(e.text for e in errors if e.text)
+            raise Exception(f"ReviseInventoryStatus failed: {msg}")
 
-    # ─── Offers / Pricing ───────────────────────────────────────────────────────
+    # ─── Offers / Pricing (Trading API) ─────────────────────────────────────
 
     def get_offers_for_sku(self, sku: str):
-        """Get all offers (listings) for a SKU."""
-        r = requests.get(
-            f"{BASE_URL}/sell/inventory/v1/offer",
-            headers=self._headers(),
-            params={"sku": sku},
-            timeout=30,
-        )
-        r.raise_for_status()
-        return r.json().get("offers", [])
+        """Not used with Trading API flow — pricing comes from GetMyeBaySelling."""
+        return []
 
-    def update_offer_price(self, offer_id: str, price: float):
-        """Update the BIN price on a published offer."""
-        r = requests.get(
-            f"{BASE_URL}/sell/inventory/v1/offer/{offer_id}",
-            headers=self._headers(), timeout=30,
-        )
-        r.raise_for_status()
-        offer = r.json()
-        offer.setdefault("pricingSummary", {})
-        offer["pricingSummary"]["price"] = {"currency": "GBP", "value": f"{price:.2f}"}
-        r2 = requests.put(
-            f"{BASE_URL}/sell/inventory/v1/offer/{offer_id}",
-            headers=self._headers(), json=offer, timeout=30,
-        )
-        r2.raise_for_status()
-        logger.info(f"eBay offer {offer_id} price → £{price:.2f}")
+    def update_offer_price(self, item_id: str, price: float):
+        """Update the BIN price on a traditional eBay listing via ReviseItem."""
+        xml = f'''<?xml version="1.0" encoding="utf-8"?>
+<ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Item>
+    <ItemID>{item_id}</ItemID>
+    <StartPrice>{price:.2f}</StartPrice>
+  </Item>
+</ReviseItemRequest>'''
+        root = self._trading_call("ReviseItem", xml)
+        ack = root.find(f'{{{NS}}}Ack')
+        if ack is not None and ack.text in ('Success', 'Warning'):
+            logger.info(f"eBay price updated item {item_id} → £{price:.2f}")
+        else:
+            errors = root.findall(f'.//{{{NS}}}Errors/{{{NS}}}LongMessage')
+            msg = "; ".join(e.text for e in errors if e.text)
+            raise Exception(f"ReviseItem failed: {msg}")
 
     # ─── Orders ─────────────────────────────────────────────────────────────────
 
@@ -168,13 +220,10 @@ class EbayClient:
         while True:
             params = {"limit": limit, "offset": offset}
             if created_after:
-                # Only filter by date — include ALL fulfillment statuses so we
-                # capture orders that were completed same-day (eBay often marks
-                # them fulfilled immediately upon payment)
                 params["filter"] = f"creationdate:[{created_after}..]"
             r = requests.get(
                 f"{BASE_URL}/sell/fulfillment/v1/order",
-                headers=self._headers(), params=params, timeout=30,
+                headers=self._rest_headers(), params=params, timeout=30,
             )
             r.raise_for_status()
             data = r.json()
@@ -189,11 +238,10 @@ class EbayClient:
 
     def create_shipping_fulfillment(self, order_id: str, tracking_number: str, carrier: str, line_item_ids: list = None):
         """Create a shipping fulfillment with tracking for an eBay order."""
-        # Get order to find line item IDs if not provided
         if not line_item_ids:
             r = requests.get(
                 f"{BASE_URL}/sell/fulfillment/v1/order/{order_id}",
-                headers=self._headers(), timeout=30,
+                headers=self._rest_headers(), timeout=30,
             )
             r.raise_for_status()
             order_data = r.json()
@@ -206,7 +254,7 @@ class EbayClient:
         }
         r = requests.post(
             f"{BASE_URL}/sell/fulfillment/v1/order/{order_id}/shipping_fulfillment",
-            headers=self._headers(), json=payload, timeout=30,
+            headers=self._rest_headers(), json=payload, timeout=30,
         )
         r.raise_for_status()
         logger.info(f"eBay tracking uploaded for order {order_id}: {carrier} {tracking_number}")

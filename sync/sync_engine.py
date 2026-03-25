@@ -95,21 +95,18 @@ class SyncEngine:
                     "product_id": product_id,
                     "total_stock": stock_qty,
                 })
-                # Upsert pricing record for eBay with platform IDs
-                try:
-                    offers = self.ebay.get_offers_for_sku(sku)
-                    if offers:
-                        price_val = offers[0].get("pricingSummary", {}).get(
-                            "price", {}).get("value", "0")
-                        self.db.upsert_price({
-                            "product_id": product_id,
-                            "platform": "ebay",
-                            "price": float(price_val),
-                            "currency": "GBP",
-                            "platform_product_id": sku,
-                        })
-                except Exception as e:
-                    logger.warning(f"Could not fetch eBay offers for SKU {sku}: {e}")
+                # Upsert pricing record for eBay
+                # item["item_id"] is the raw eBay ItemID needed for ReviseItem/ReviseInventoryStatus
+                # item["price"] comes directly from GetMyeBaySelling (BuyItNowPrice)
+                ebay_item_id = item.get("item_id", sku)
+                price_val = item.get("price", 0.0)
+                self.db.upsert_price({
+                    "product_id": product_id,
+                    "platform": "ebay",
+                    "price": float(price_val),
+                    "currency": "GBP",
+                    "platform_product_id": ebay_item_id,
+                })
 
         logger.info(f"eBay catalogue: {ebay_synced} new products, {len(ebay_items)} total eBay items")
         total_synced = synced + ebay_synced
@@ -277,11 +274,10 @@ class SyncEngine:
                     if pp_id and pv_id:
                         self.ss.update_variant_price(pp_id, pv_id, float(row["price"]))
                 elif row["platform"] == "ebay":
-                    ebay_sku = row.get("platform_product_id")
-                    if ebay_sku:
-                        offers = self.ebay.get_offers_for_sku(ebay_sku)
-                        for offer in offers:
-                            self.ebay.update_offer_price(offer["offerId"], float(row["price"]))
+                    # platform_product_id stores the eBay ItemID for traditional listings
+                    ebay_item_id = row.get("platform_product_id")
+                    if ebay_item_id:
+                        self.ebay.update_offer_price(ebay_item_id, float(row["price"]))
                 self.db.mark_price_synced(row["id"])
                 pushed += 1
             except Exception as e:
