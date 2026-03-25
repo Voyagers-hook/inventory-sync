@@ -105,8 +105,10 @@ class SyncEngine:
             status = order.get("fulfillmentStatus", "PENDING")
 
             # Update status for already-imported orders
+            # Only upgrade to FULFILLED; never downgrade from TRACKING_PUSHED back to PENDING
             if self.db.order_exists("squarespace", order_id):
-                self.db.update_order_status(order_id, status)
+                if status == "FULFILLED":
+                    self.db.update_order_status(order_id, status)
                 continue
 
             if status not in ("PENDING", "FULFILLED"):
