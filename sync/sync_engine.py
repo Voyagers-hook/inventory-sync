@@ -1,6 +1,8 @@
 """
 Core sync logic.
-Handles order processing, stock propagation, price sync, and trend snapshots.
+Stock push rule: ONLY push when explicitly queued.
+Queue is populated by: order processing, merges, manual stock edits.
+Nothing else ever pushes stock to platforms.
 """
 import logging
 from datetime import datetime, timezone, timedelta
@@ -89,14 +91,13 @@ class SyncEngine:
                 })
 
         logger.info(f"eBay catalogue: {ebay_synced} new products, {len(ebay_items)} total")
-        total_synced = synced + ebay_synced
-        logger.info(f"Catalogue sync complete: {total_synced} new products added")
-        return total_synced
+        logger.info(f"Catalogue sync complete: {synced + ebay_synced} new products added")
+        return synced + ebay_synced
 
     # ─── Order Processing ────────────────────────────────────────────────────
 
     def process_squarespace_orders(self, since: str = None):
-        """Process new SS orders → deduct stock → push updated qty to eBay."""
+        """Process new SS orders → deduct stock → queue push to eBay."""
         logger.info(f"Processing SS orders since {since}")
         orders = self.ss.get_orders(modified_after=since)
         processed = 0
@@ -104,8 +105,6 @@ class SyncEngine:
             order_id = order.get("id")
             status = order.get("fulfillmentStatus", "PENDING")
 
-            # Update status for already-imported orders
-            # Only upgrade to FULFILLED; never downgrade from TRACKING_PUSHED back to PENDING
             if self.db.order_exists("squarespace", order_id):
                 if status == "FULFILLED":
                     self.db.update_order_status(order_id, status)
@@ -151,34 +150,26 @@ class SyncEngine:
                     "item_name": line.get("productName", ""),
                     "order_number": order.get("orderNumber", ""),
                 })
+                # Deduct stock in DB, then queue a push to both platforms
                 inv_rows = self.db.get_inventory(product["id"])
                 if inv_rows:
                     inv = inv_rows[0]
                     new_stock = max(0, inv["total_stock"] - qty_sold)
                     self.db.upsert_inventory({"id": inv["id"], "product_id": product["id"], "total_stock": new_stock})
-                    ebay_pricing = self.db.get_platform_pricing_for_product(product["id"], "ebay")
-                    if ebay_pricing:
-                        ebay_sku = ebay_pricing[0].get("platform_product_id")
-                        if ebay_sku:
-                            try:
-                                self.ebay.update_inventory_quantity(ebay_sku, new_stock)
-                            except Exception as e:
-                                logger.error(f"eBay stock update failed for {sku}: {e}")
+                    self.db.queue_stock_push(product["id"], new_stock)
+                    logger.info(f"SS sale: {sku} qty={qty_sold} → stock now {new_stock} (queued push)")
             processed += 1
         logger.info(f"SS orders processed: {processed}")
         return processed
 
     def process_ebay_orders(self, since: str = None):
-        """Process new eBay orders + reconcile statuses for last 90 days.
-        Always looks back 90 days so fulfilled/cancelled orders get their status updated.
-        """
-        # Always look back 90 days for full status reconciliation
+        """Process new eBay orders + reconcile statuses for last 90 days."""
         reconcile_since = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        logger.info(f"Processing eBay orders (new since {since or 'start'}, reconciling last 90 days)")
+        logger.info(f"Processing eBay orders (reconciling last 90 days)")
         orders = self.ebay.get_orders(created_after=reconcile_since)
         processed = 0
 
-        # ── Pass 1: Reconcile statuses of all already-imported orders ──
+        # ── Pass 1: Reconcile statuses ──
         for order in orders:
             order_id = order.get("orderId")
             if not self.db.order_exists("ebay", order_id):
@@ -186,12 +177,11 @@ class SyncEngine:
             cancel_state = order.get("cancelStatus", {}).get("cancelState", "NONE_REQUESTED")
             if cancel_state == "CANCELLED":
                 self.db.update_order_status(order_id, "CANCELLED")
-                logger.info(f"Reconciled eBay order {order_id} → CANCELLED")
             else:
                 ebay_status = order.get("orderFulfillmentStatus", "NOT_STARTED")
                 self.db.update_order_status(order_id, ebay_status)
 
-        # ── Pass 2: Import any new orders not yet in DB ──
+        # ── Pass 2: Import new orders ──
         for order in orders:
             order_id = order.get("orderId")
             cancel_state = order.get("cancelStatus", {}).get("cancelState", "NONE_REQUESTED")
@@ -237,19 +227,14 @@ class SyncEngine:
                     "item_name": line.get("title", ""),
                     "order_number": order.get("orderId", ""),
                 })
+                # Deduct stock in DB, then queue a push to both platforms
                 inv_rows = self.db.get_inventory(product["id"])
                 if inv_rows:
                     inv = inv_rows[0]
                     new_stock = max(0, inv["total_stock"] - qty_sold)
                     self.db.upsert_inventory({"id": inv["id"], "product_id": product["id"], "total_stock": new_stock})
-                    ss_pricing = self.db.get_platform_pricing_for_product(product["id"], "squarespace")
-                    if ss_pricing:
-                        ss_variant_id = ss_pricing[0].get("platform_variant_id")
-                        if ss_variant_id:
-                            try:
-                                self.ss.set_variant_stock(ss_variant_id, new_stock)
-                            except Exception as e:
-                                logger.error(f"SS stock update failed for {sku}: {e}")
+                    self.db.queue_stock_push(product["id"], new_stock)
+                    logger.info(f"eBay sale: {sku} qty={qty_sold} → stock now {new_stock} (queued push)")
             processed += 1
 
         logger.info(f"eBay orders processed: {processed} new, statuses reconciled for all 90-day orders")
@@ -278,10 +263,75 @@ class SyncEngine:
         logger.info(f"Price changes pushed: {pushed}")
         return pushed
 
+    # ─── Stock Push (Queue-Based) ────────────────────────────────────────────
+
+    def sync_pending_stock_changes(self):
+        """Push stock to platforms for ONLY products explicitly in the push queue.
+        Queue is populated by: order processing, merges, manual stock edits.
+        Nothing else ever adds to the queue — so this never bulk-pushes all products.
+        """
+        queue = self.db.get_stock_push_queue()
+        if not queue:
+            logger.info("Stock push queue: empty")
+            return 0
+
+        logger.info(f"Stock push queue: {len(queue)} product(s) to push")
+
+        ss_updates = []   # [{variant_id, new_qty}]
+        ebay_updates = [] # [{item_id, new_qty, product_id}]
+
+        for item in queue:
+            product_id = item["product_id"]
+            new_stock = item["stock"]
+
+            for ep in self.db.get_platform_pricing_for_product(product_id, "ebay"):
+                ebay_item_id = ep.get("platform_product_id")
+                if ebay_item_id:
+                    ebay_updates.append({
+                        "item_id": ebay_item_id,
+                        "new_qty": new_stock,
+                        "product_id": product_id,
+                    })
+
+            for sp in self.db.get_platform_pricing_for_product(product_id, "squarespace"):
+                variant_id = sp.get("platform_variant_id")
+                if variant_id:
+                    ss_updates.append({
+                        "variant_id": variant_id,
+                        "new_qty": new_stock,
+                        "product_id": product_id,
+                    })
+
+        pushed = 0
+
+        # ── Push to eBay ─────────────────────────────────────────────────────
+        for upd in ebay_updates:
+            try:
+                self.ebay.update_inventory_quantity(upd["item_id"], upd["new_qty"])
+                pushed += 1
+                logger.info(f"Stock → eBay item {upd['item_id']}: {upd['new_qty']}")
+            except Exception as e:
+                logger.error(f"eBay stock push failed {upd['item_id']}: {e}")
+
+        # ── Push to Squarespace (one fetch of all inventory, one batch call) ─
+        if ss_updates:
+            try:
+                ss_inv_map = self.ss.get_all_inventory_map()
+                adjusted = self.ss.set_multiple_variant_stocks(ss_updates, inventory_map=ss_inv_map)
+                pushed += adjusted
+            except Exception as e:
+                logger.error(f"SS batch stock push failed: {e}")
+
+        # ── Clear queue for all processed products ───────────────────────────
+        for item in queue:
+            self.db.clear_stock_push(item["product_id"])
+
+        logger.info(f"Stock push complete: {pushed} platform update(s) for {len(queue)} product(s)")
+        return pushed
+
     # ─── Trend Snapshots ─────────────────────────────────────────────────────
 
     def update_daily_snapshots(self):
-        """Tally today's sales per product/platform and upsert into sales_trends."""
         today = datetime.now(timezone.utc).date().isoformat()
         orders = self.db.get_orders(limit=500)
         tally = {}
@@ -289,7 +339,7 @@ class SyncEngine:
             if not o.get("ordered_at"):
                 continue
             if not o.get("product_id"):
-                continue  # skip orders without a matched product
+                continue
             sale_day = o["ordered_at"][:10]
             if sale_day != today:
                 continue
@@ -308,75 +358,6 @@ class SyncEngine:
             })
         logger.info(f"Daily snapshot updated: {len(tally)} product/platform entries")
 
-    # ─── Stock Push ──────────────────────────────────────────────────────────
-
-    def sync_pending_stock_changes(self):
-        """Push stock levels to both platforms for any product whose inventory was updated.
-
-        Triggered by: merges, manual stock edits, or order-driven stock deductions.
-        Uses last_stock_sync_time setting as a watermark so only changed products are pushed.
-
-        KEY OPTIMISATION: Squarespace inventory is fetched ONCE as a map, then all
-        variant stock levels are sent as a SINGLE batch adjustment call — not one
-        paginated fetch per variant (which was causing multi-minute timeouts).
-        """
-        # Initialise watermark if never set — look back 24 hours to catch today's merges
-        if not self.db.get_setting("last_stock_sync_time"):
-            yesterday = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-            self.db.set_setting("last_stock_sync_time", yesterday)
-            logger.info("Stock sync watermark initialised (looking back 24 hours)")
-
-        inv_rows = self.db.get_products_needing_stock_sync()
-        if not inv_rows:
-            logger.info("Stock sync: no pending changes")
-            self.db.set_setting("last_stock_sync_time", datetime.now(timezone.utc).isoformat())
-            return 0
-
-        logger.info(f"Stock sync: {len(inv_rows)} product(s) changed — fetching platform data")
-
-        # ── Collect all SS and eBay updates ─────────────────────────────────
-        ss_updates = []    # [{variant_id, new_qty}]
-        ebay_updates = []  # [{item_id, new_qty}]
-
-        for inv in inv_rows:
-            product_id = inv["product_id"]
-            new_stock = inv["total_stock"]
-
-            for ep in self.db.get_platform_pricing_for_product(product_id, "ebay"):
-                item_id = ep.get("platform_product_id")
-                if item_id:
-                    ebay_updates.append({"item_id": item_id, "new_qty": new_stock})
-
-            for sp in self.db.get_platform_pricing_for_product(product_id, "squarespace"):
-                variant_id = sp.get("platform_variant_id")
-                if variant_id:
-                    ss_updates.append({"variant_id": variant_id, "new_qty": new_stock})
-
-        pushed = 0
-
-        # ── Push to eBay (individual ReviseInventoryStatus calls) ────────────
-        for upd in ebay_updates:
-            try:
-                self.ebay.update_inventory_quantity(upd["item_id"], upd["new_qty"])
-                pushed += 1
-                logger.info(f"Stock → eBay {upd['item_id']}: {upd['new_qty']}")
-            except Exception as e:
-                logger.error(f"eBay stock push failed {upd['item_id']}: {e}")
-
-        # ── Push to Squarespace (ONE fetch of all inventory, ONE batch call) ─
-        if ss_updates:
-            try:
-                # Fetch all SS inventory ONCE — then batch all adjustments together
-                ss_inv_map = self.ss.get_all_inventory_map()
-                adjusted = self.ss.set_multiple_variant_stocks(ss_updates, inventory_map=ss_inv_map)
-                pushed += adjusted
-            except Exception as e:
-                logger.error(f"SS batch stock push failed: {e}")
-
-        self.db.set_setting("last_stock_sync_time", datetime.now(timezone.utc).isoformat())
-        logger.info(f"Stock sync complete: {pushed} platform update(s) for {len(inv_rows)} product(s)")
-        return pushed
-
     # ─── Full Sync ───────────────────────────────────────────────────────────
 
     def run_full_sync(self):
@@ -394,15 +375,14 @@ class SyncEngine:
 
         total += self.process_squarespace_orders(since)
         total += self.process_ebay_orders(since)
-        total += self.sync_pending_stock_changes()   # Push any stock changes to both platforms
+        total += self.sync_pending_stock_changes()   # Only pushes queued products
         total += self.sync_pending_price_changes()
-        total += self.push_pending_tracking()        # Push any pending tracking on every sync
+        total += self.push_pending_tracking()
         self.update_daily_snapshots()
         self.db.set_setting("last_full_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         return total
 
     def push_pending_tracking(self) -> int:
-        """Push tracking numbers from the dashboard to eBay/Squarespace."""
         orders = self.db.get_orders_needing_tracking_push()
         pushed = 0
         for order in orders:
@@ -439,7 +419,6 @@ class SyncEngine:
         """
         count = 0
 
-        # Always push tracking and stock changes — these are time-sensitive
         pushed = self.push_pending_tracking()
         if pushed:
             logger.info(f"Quick check: pushed {pushed} tracking number(s)")
