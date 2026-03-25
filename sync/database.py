@@ -37,14 +37,8 @@ class Database:
 
     def count_products(self):
         """Return total number of products in DB."""
-        r = self._get("products", params={"select": "id", "limit": "1"}, headers={"Prefer": "count=exact"})
-        # content-range header: 0-0/N or */N
-        cr = r.headers.get("content-range", "0/0")
-        total = cr.split("/")[-1]
-        try:
-            return int(total)
-        except Exception:
-            return len(r.json())
+        rows = self._rest("GET", "products", params={"select": "id"})
+        return len(rows)
 
     def get_setting(self, key: str):
         rows = self._rest("GET", "settings", params={"key": f"eq.{key}", "select": "value"})
