@@ -23,6 +23,8 @@ function PlatformBadge({ platform }: { platform: string }) {
 
 function StatusBadge({ status }: { status: string }) {
   const s = (status || 'PENDING').toUpperCase();
+  if (s === 'CANCELLED' || s === 'CANCELED')
+    return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-50 text-red-600 border border-red-100">Cancelled</span>;
   if (s === 'PENDING' || s === 'NOT_STARTED')
     return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-50 text-orange-600 border border-orange-100">Pending</span>;
   if (s === 'SHIPPED' || s === 'IN_PROGRESS')
@@ -228,7 +230,8 @@ export const Orders: React.FC<OrdersProps> = ({ orders, onRefresh }) => {
     if (filterPlatform !== 'all' && !o.platform?.toLowerCase().includes(filterPlatform)) return false;
     if (filterStatus !== 'all') {
       const s = (o.fulfillment_status || 'PENDING').toUpperCase();
-      if (filterStatus === 'PENDING' && s !== 'PENDING' && s !== 'NOT_STARTED') return false;
+      if (filterStatus === 'PENDING' && (s !== 'PENDING' && s !== 'NOT_STARTED' || s === 'CANCELLED' || s === 'CANCELED')) return false;
+      if (filterStatus !== 'PENDING' && filterStatus !== 'all' && (s === 'CANCELLED' || s === 'CANCELED')) return false;
       if (filterStatus === 'SHIPPED' && s !== 'SHIPPED' && s !== 'IN_PROGRESS') return false;
       if (filterStatus === 'DELIVERED' && s !== 'DELIVERED' && s !== 'FULFILLED') return false;
     }
@@ -264,6 +267,7 @@ export const Orders: React.FC<OrdersProps> = ({ orders, onRefresh }) => {
         <select className="select select-bordered select-sm" value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
           <option value="all">All Statuses</option>
           <option value="PENDING">Pending</option>
+          <option value="CANCELLED">Cancelled</option>
           <option value="SHIPPED">Shipped</option>
           <option value="DELIVERED">Fulfilled</option>
         </select>
