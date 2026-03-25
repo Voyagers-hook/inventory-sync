@@ -315,7 +315,10 @@ class SyncEngine:
 
         Triggered by: merges, manual stock edits, or order-driven stock deductions.
         Uses last_stock_sync_time setting as a watermark so only changed products are pushed.
-        On first ever run, looks back 24 hours to catch recent merges/edits.
+
+        KEY OPTIMISATION: Squarespace inventory is fetched ONCE as a map, then all
+        variant stock levels are sent as a SINGLE batch adjustment call — not one
+        paginated fetch per variant (which was causing multi-minute timeouts).
         """
         # Initialise watermark if never set — look back 24 hours to catch today's merges
         if not self.db.get_setting("last_stock_sync_time"):
@@ -329,33 +332,46 @@ class SyncEngine:
             self.db.set_setting("last_stock_sync_time", datetime.now(timezone.utc).isoformat())
             return 0
 
-        logger.info(f"Stock sync: {len(inv_rows)} product(s) need pushing to platforms")
-        pushed = 0
+        logger.info(f"Stock sync: {len(inv_rows)} product(s) changed — fetching platform data")
+
+        # ── Collect all SS and eBay updates ─────────────────────────────────
+        ss_updates = []    # [{variant_id, new_qty}]
+        ebay_updates = []  # [{item_id, new_qty}]
+
         for inv in inv_rows:
             product_id = inv["product_id"]
             new_stock = inv["total_stock"]
 
-            # Push to eBay
             for ep in self.db.get_platform_pricing_for_product(product_id, "ebay"):
                 item_id = ep.get("platform_product_id")
                 if item_id:
-                    try:
-                        self.ebay.update_inventory_quantity(item_id, new_stock)
-                        pushed += 1
-                        logger.info(f"Stock → eBay {item_id}: {new_stock}")
-                    except Exception as e:
-                        logger.error(f"eBay stock push failed {item_id}: {e}")
+                    ebay_updates.append({"item_id": item_id, "new_qty": new_stock})
 
-            # Push to Squarespace
             for sp in self.db.get_platform_pricing_for_product(product_id, "squarespace"):
                 variant_id = sp.get("platform_variant_id")
                 if variant_id:
-                    try:
-                        self.ss.set_variant_stock(variant_id, new_stock)
-                        pushed += 1
-                        logger.info(f"Stock → SS variant {variant_id}: {new_stock}")
-                    except Exception as e:
-                        logger.error(f"SS stock push failed {variant_id}: {e}")
+                    ss_updates.append({"variant_id": variant_id, "new_qty": new_stock})
+
+        pushed = 0
+
+        # ── Push to eBay (individual ReviseInventoryStatus calls) ────────────
+        for upd in ebay_updates:
+            try:
+                self.ebay.update_inventory_quantity(upd["item_id"], upd["new_qty"])
+                pushed += 1
+                logger.info(f"Stock → eBay {upd['item_id']}: {upd['new_qty']}")
+            except Exception as e:
+                logger.error(f"eBay stock push failed {upd['item_id']}: {e}")
+
+        # ── Push to Squarespace (ONE fetch of all inventory, ONE batch call) ─
+        if ss_updates:
+            try:
+                # Fetch all SS inventory ONCE — then batch all adjustments together
+                ss_inv_map = self.ss.get_all_inventory_map()
+                adjusted = self.ss.set_multiple_variant_stocks(ss_updates, inventory_map=ss_inv_map)
+                pushed += adjusted
+            except Exception as e:
+                logger.error(f"SS batch stock push failed: {e}")
 
         self.db.set_setting("last_stock_sync_time", datetime.now(timezone.utc).isoformat())
         logger.info(f"Stock sync complete: {pushed} platform update(s) for {len(inv_rows)} product(s)")
