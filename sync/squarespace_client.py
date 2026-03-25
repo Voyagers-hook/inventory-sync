@@ -61,30 +61,64 @@ class SquarespaceClient:
             cursor = pagination.get("nextPageCursor")
         return inventory
 
-    def set_variant_stock(self, variant_id: str, new_qty: int):
-        """Set absolute stock level for a variant using an adjustment delta.
-        Paginates through ALL inventory pages to find the correct current quantity.
-        Without pagination, the delta would be wrong for variants not on page 1.
+    def get_all_inventory_map(self) -> dict:
+        """Fetch ALL inventory pages and return {variantId: quantity} dict.
+        Used for efficient bulk stock sync — call this once, then look up variants locally.
         """
-        current_qty = 0
+        inv_map = {}
         cursor = None
-        found = False
         while True:
             params = {}
             if cursor:
                 params["cursor"] = cursor
             data = self._get("/commerce/inventory", params)
             for item in data.get("inventory", []):
-                if item.get("variantId") == variant_id:
-                    current_qty = item.get("quantity", 0)
-                    found = True
-                    break
-            if found:
-                break
+                vid = item.get("variantId")
+                if vid:
+                    inv_map[vid] = item.get("quantity", 0)
             pagination = data.get("pagination", {})
             if not pagination.get("hasNextPage"):
                 break
             cursor = pagination.get("nextPageCursor")
+        logger.info(f"SS inventory map built: {len(inv_map)} variants")
+        return inv_map
+
+    def set_multiple_variant_stocks(self, updates: list, inventory_map: dict = None) -> int:
+        """Batch update stock levels for multiple variants in a single API call.
+
+        updates: list of {"variant_id": str, "new_qty": int}
+        inventory_map: optional pre-fetched {variantId: qty} dict (fetched here if not provided)
+
+        Returns number of variants actually adjusted.
+        """
+        if not updates:
+            return 0
+        if inventory_map is None:
+            inventory_map = self.get_all_inventory_map()
+        adjustments = []
+        for upd in updates:
+            vid = upd["variant_id"]
+            new_qty = upd["new_qty"]
+            current_qty = inventory_map.get(vid, 0)
+            delta = new_qty - current_qty
+            if delta != 0:
+                adjustments.append({"variantId": vid, "quantityDelta": delta})
+                logger.info(f"SS stock queued: variant {vid} {current_qty} → {new_qty} (delta {delta:+d})")
+        if adjustments:
+            payload = {"adjustments": adjustments}
+            self._post("/commerce/inventory/adjustments", payload)
+            logger.info(f"SS batch stock update sent: {len(adjustments)} variants adjusted")
+        else:
+            logger.info("SS batch stock update: all variants already at correct levels")
+        return len(adjustments)
+
+    def set_variant_stock(self, variant_id: str, new_qty: int, inventory_map: dict = None):
+        """Set absolute stock level for a single variant.
+        Pass inventory_map if you already have it (avoids re-fetching all inventory).
+        """
+        if inventory_map is None:
+            inventory_map = self.get_all_inventory_map()
+        current_qty = inventory_map.get(variant_id, 0)
         delta = new_qty - current_qty
         if delta == 0:
             logger.info(f"SS stock unchanged for variant {variant_id}")
