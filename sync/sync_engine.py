@@ -320,8 +320,7 @@ class SyncEngine:
     # ─── Full Sync ───────────────────────────────────────────────────────────
 
     def run_full_sync(self):
-        since = self.db.get_setting("last_full_sync") or (
-            (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        since = self.db.get_setting("last_full_sync") or (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
         total = 0
         total += self.process_squarespace_orders(since)
         total += self.process_ebay_orders(since)
