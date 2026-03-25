@@ -195,8 +195,22 @@ class SyncEngine:
         logger.info(f"Processing eBay orders since {since}")
         orders = self.ebay.get_orders(created_after=since)
         processed = 0
+
+        # ── Reconcile: update any already-imported orders that are now CANCELLED ──
+        for order in orders:
+            cancel_state = order.get("cancelStatus", {}).get("cancelState", "NONE_REQUESTED")
+            if cancel_state == "CANCELLED":
+                order_id = order.get("orderId")
+                if self.db.order_exists("ebay", order_id):
+                    self.db.update_order_status(order_id, "CANCELLED")
+                    logger.info(f"Marked eBay order {order_id} as CANCELLED")
+
         for order in orders:
             order_id = order.get("orderId")
+            # Skip cancelled orders entirely
+            cancel_state = order.get("cancelStatus", {}).get("cancelState", "NONE_REQUESTED")
+            if cancel_state == "CANCELLED":
+                continue
             if self.db.order_exists("ebay", order_id):
                 continue
 
