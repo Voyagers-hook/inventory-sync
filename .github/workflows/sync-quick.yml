@@ -1,12 +1,12 @@
 name: Quick Sync (On Demand)
 
 on:
-  workflow_dispatch:   # Only runs when triggered manually from the dashboard
+  workflow_dispatch:
 
 jobs:
   quick-sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
 
     steps:
       - uses: actions/checkout@v4
@@ -18,13 +18,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r sync/requirements.txt
 
-      - name: Quick sync
+      - name: Run quick sync
         working-directory: sync
         run: python main.py --mode quick
         env:
-          SQUARESPACE_API_KEY:  ${{ secrets.SQUARESPACE_API_KEY }}
-          EBAY_APP_ID:          ${{ secrets.EBAY_APP_ID }}
-          EBAY_CERT_ID:         ${{ secrets.EBAY_CERT_ID }}
-          EBAY_REFRESH_TOKEN:   ${{ secrets.EBAY_REFRESH_TOKEN }}
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SQUARESPACE_API_KEY:    ${{ secrets.SQUARESPACE_API_KEY }}
+          EBAY_APP_ID:            ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID:           ${{ secrets.EBAY_CERT_ID }}
+          EBAY_REFRESH_TOKEN:     ${{ secrets.EBAY_REFRESH_TOKEN }}
+          SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY:   ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_DB_PASSWORD:   ${{ secrets.SUPABASE_DB_PASSWORD }}
