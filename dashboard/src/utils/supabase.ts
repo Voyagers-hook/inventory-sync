@@ -118,3 +118,37 @@ export async function mergeProducts(keepId: string, removeId: string, keepStock:
   await supabase.from('inventory').delete().eq('product_id', removeId);
   await supabase.from('products').delete().eq('id', removeId);
 }
+
+// ─── GitHub Actions Trigger ───────────────────────────────────────────────────
+
+const GITHUB_TOKEN = import.meta.env.VITE_GITHUB_TOKEN || '';
+const GITHUB_REPO = import.meta.env.VITE_GITHUB_REPO || 'Voyagers-hook/inventory-sync';
+
+/**
+ * Triggers the Quick Sync workflow on GitHub Actions immediately.
+ * Returns true if the trigger was accepted (HTTP 204), false otherwise.
+ */
+export async function triggerQuickSync(): Promise<boolean> {
+  if (!GITHUB_TOKEN) {
+    console.warn('VITE_GITHUB_TOKEN not set — cannot trigger sync');
+    return false;
+  }
+  try {
+    const resp = await fetch(
+      `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/sync-quick.yml/dispatches`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${GITHUB_TOKEN}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ ref: 'main' }),
+      }
+    );
+    return resp.status === 204;
+  } catch (e) {
+    console.error('Failed to trigger quick sync:', e);
+    return false;
+  }
+}
