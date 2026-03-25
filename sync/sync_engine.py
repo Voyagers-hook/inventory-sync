@@ -196,14 +196,18 @@ class SyncEngine:
         orders = self.ebay.get_orders(created_after=since)
         processed = 0
 
-        # ── Reconcile: update any already-imported orders that are now CANCELLED ──
+        # ── Reconcile: update statuses for all already-imported orders ──
         for order in orders:
-            cancel_state = order.get("cancelStatus", {}).get("cancelState", "NONE_REQUESTED")
-            if cancel_state == "CANCELLED":
-                order_id = order.get("orderId")
-                if self.db.order_exists("ebay", order_id):
+            order_id = order.get("orderId")
+            if self.db.order_exists("ebay", order_id):
+                cancel_state = order.get("cancelStatus", {}).get("cancelState", "NONE_REQUESTED")
+                if cancel_state == "CANCELLED":
                     self.db.update_order_status(order_id, "CANCELLED")
                     logger.info(f"Marked eBay order {order_id} as CANCELLED")
+                else:
+                    # Sync latest fulfillment status (catches FULFILLED orders)
+                    ebay_status = order.get("orderFulfillmentStatus", "NOT_STARTED")
+                    self.db.update_order_status(order_id, ebay_status)
 
         for order in orders:
             order_id = order.get("orderId")
@@ -247,7 +251,7 @@ class SyncEngine:
                     "shipping_county": address.get("stateOrProvince", ""),
                     "shipping_postcode": address.get("postalCode", ""),
                     "shipping_country": address.get("countryCode", ""),
-                    "fulfillment_status": "NOT_STARTED" if order.get("orderFulfillmentStatus") == "NOT_STARTED" else "IN_PROGRESS",
+                    "fulfillment_status": order.get("orderFulfillmentStatus", "NOT_STARTED"),
                     "order_total": float(order.get("totalFeeBasisAmount", {}).get("value", 0)),
                     "item_name": line.get("title", ""),
                     "order_number": order.get("orderId", ""),
