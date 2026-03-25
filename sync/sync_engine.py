@@ -351,11 +351,55 @@ class SyncEngine:
         self.db.set_setting("last_full_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         return total
 
+    def push_pending_tracking(self) -> int:
+        """Push tracking numbers from the dashboard to eBay/Squarespace."""
+        orders = self.db.get_orders_needing_tracking_push()
+        pushed = 0
+        for order in orders:
+            platform = (order.get("platform") or "").lower()
+            platform_order_id = order.get("platform_order_id") or ""
+            tracking_number = order.get("tracking_number") or ""
+            carrier = order.get("tracking_carrier") or "Royal Mail"
+            order_id = order.get("id")
+
+            if not tracking_number or not platform_order_id:
+                continue
+
+            try:
+                if "ebay" in platform:
+                    self.ebay.create_shipping_fulfillment(
+                        platform_order_id, tracking_number, carrier
+                    )
+                    logger.info(f"Pushed tracking to eBay order {platform_order_id}")
+                elif "squarespace" in platform:
+                    self.ss.update_order_fulfillment(
+                        platform_order_id, tracking_number, carrier
+                    )
+                    logger.info(f"Pushed tracking to Squarespace order {platform_order_id}")
+                self.db.mark_tracking_pushed(order_id)
+                pushed += 1
+            except Exception as e:
+                logger.warning(f"Failed to push tracking for order {platform_order_id}: {e}")
+
+        return pushed
+
     def run_quick_check(self):
-        """Runs every 5 min: only processes if manual sync was requested."""
-        if not self.db.is_sync_requested():
-            logger.info("Quick check: no sync requested, exiting")
-            return 0
-        logger.info("Quick check: manual sync requested, running...")
-        self.db.clear_sync_request()
-        return self.run_full_sync()
+        """Triggered on demand: push any pending tracking, then full sync if requested."""
+        count = 0
+
+        # Always push any pending tracking numbers immediately
+        pushed = self.push_pending_tracking()
+        if pushed:
+            logger.info(f"Quick check: pushed {pushed} tracking number(s) to platforms")
+            count += pushed
+
+        # Run full sync if manually requested from dashboard
+        if self.db.is_sync_requested():
+            logger.info("Quick check: manual sync requested, running full sync...")
+            self.db.clear_sync_request()
+            count += self.run_full_sync()
+        else:
+            logger.info("Quick check: no manual sync requested")
+
+        return count
+
