@@ -268,7 +268,6 @@ class SyncEngine:
     def sync_pending_stock_changes(self):
         """Push stock to platforms for ONLY products explicitly in the push queue.
         Queue is populated by: order processing, merges, manual stock edits.
-        Nothing else ever adds to the queue — so this never bulk-pushes all products.
         """
         queue = self.db.get_stock_push_queue()
         if not queue:
@@ -277,30 +276,22 @@ class SyncEngine:
 
         logger.info(f"Stock push queue: {len(queue)} product(s) to push")
 
-        ss_updates = []   # [{variant_id, new_qty}]
-        ebay_updates = [] # [{item_id, new_qty, product_id}]
+        ss_variant_updates = []   # [{"variantId": str, "quantity": int}]
+        ebay_updates = []         # [{"item_id": str, "new_qty": int}]
 
         for item in queue:
             product_id = item["product_id"]
-            new_stock = item["stock"]
+            new_stock  = item["stock"]
 
             for ep in self.db.get_platform_pricing_for_product(product_id, "ebay"):
                 ebay_item_id = ep.get("platform_product_id")
                 if ebay_item_id:
-                    ebay_updates.append({
-                        "item_id": ebay_item_id,
-                        "new_qty": new_stock,
-                        "product_id": product_id,
-                    })
+                    ebay_updates.append({"item_id": ebay_item_id, "new_qty": new_stock})
 
             for sp in self.db.get_platform_pricing_for_product(product_id, "squarespace"):
                 variant_id = sp.get("platform_variant_id")
                 if variant_id:
-                    ss_updates.append({
-                        "variant_id": variant_id,
-                        "new_qty": new_stock,
-                        "product_id": product_id,
-                    })
+                    ss_variant_updates.append({"variantId": variant_id, "quantity": new_stock})
 
         pushed = 0
 
@@ -313,12 +304,13 @@ class SyncEngine:
             except Exception as e:
                 logger.error(f"eBay stock push failed {upd['item_id']}: {e}")
 
-        # ── Push to Squarespace (one fetch of all inventory, one batch call) ─
-        if ss_updates:
+        # ── Push to Squarespace (one batch call with setFiniteOperations) ────
+        if ss_variant_updates:
             try:
-                ss_inv_map = self.ss.get_all_inventory_map()
-                adjusted = self.ss.set_multiple_variant_stocks(ss_updates, inventory_map=ss_inv_map)
+                adjusted = self.ss.set_variant_stocks(ss_variant_updates)
                 pushed += adjusted
+                for upd in ss_variant_updates:
+                    logger.info(f"Stock → SS variant {upd['variantId']}: {upd['quantity']}")
             except Exception as e:
                 logger.error(f"SS batch stock push failed: {e}")
 
@@ -328,9 +320,6 @@ class SyncEngine:
 
         logger.info(f"Stock push complete: {pushed} platform update(s) for {len(queue)} product(s)")
         return pushed
-
-    # ─── Trend Snapshots ─────────────────────────────────────────────────────
-
     def update_daily_snapshots(self):
         today = datetime.now(timezone.utc).date().isoformat()
         orders = self.db.get_orders(limit=500)
