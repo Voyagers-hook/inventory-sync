@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { Plus, Trash2, Search, RefreshCw, Edit3, AlertTriangle, Link, Unlink, X, GitMerge, CheckSquare } from 'lucide-react';
+import { Plus, Trash2, Search, RefreshCw, AlertTriangle, Link, Unlink, X, GitMerge } from 'lucide-react';
 import type { Product, Inventory, Pricing } from '../types';
 import {
   createProduct, createInventory, createPricing, deleteProduct,
@@ -38,6 +38,7 @@ const PricingModal: React.FC<{
   const [costPrice, setCostPrice] = useState(product.cost_price != null ? String(product.cost_price) : '');
   const [ssPrice, setSsPrice] = useState(ssPricing ? String(Number(ssPricing.price).toFixed(2)) : '');
   const [ebPrice, setEbPrice] = useState(ebPricing ? String(Number(ebPricing.price).toFixed(2)) : '');
+  const [stockValue, setStockValue] = useState(inv ? String(inv.total_stock) : '0');
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState('');
 
@@ -50,18 +51,28 @@ const PricingModal: React.FC<{
   const handleSave = useCallback(async () => {
     setSaving(true);
     try {
+      // Save cost price
       await updateProduct(product.id, { cost_price: costPrice !== '' ? parseFloat(costPrice) : null });
+
+      // Save platform prices (queues price sync)
       if (ssPricing && ssPrice !== '') await updatePricing(ssPricing.id, parseFloat(ssPrice));
       if (ebPricing && ebPrice !== '') await updatePricing(ebPricing.id, parseFloat(ebPrice));
-      setToast('Saved! Prices will sync to platforms on next run.');
-      setTimeout(() => { onSave(); onClose(); }, 1800);
+
+      // Save stock (also queues a push to both platforms via supabase.ts)
+      const newStock = Math.max(0, parseInt(stockValue) || 0);
+      if (inv && newStock !== inv.total_stock) {
+        await updateInventory(product.id, { total_stock: newStock });
+      }
+
+      setToast('Saved! Changes will push to platforms on next sync (or click Sync Now).');
+      setTimeout(() => { onSave(); onClose(); }, 2000);
     } catch {
       setToast('Failed to save — please try again.');
       setTimeout(() => setToast(''), 3000);
     } finally {
       setSaving(false);
     }
-  }, [product.id, costPrice, ssPricing, ssPrice, ebPricing, ebPrice, onSave, onClose]);
+  }, [product.id, costPrice, ssPricing, ssPrice, ebPricing, ebPrice, inv, stockValue, onSave, onClose]);
 
   return (
     <div className="modal modal-open">
@@ -84,22 +95,34 @@ const PricingModal: React.FC<{
             </div>
           )}
 
-          {/* Stock info */}
-          {inv && (
-            <div className="bg-base-200 rounded-xl px-4 py-3 flex items-center justify-between">
-              <span className="text-sm text-base-content/60">Current Stock</span>
-              <span className={`text-sm font-bold ${inv.total_stock <= (inv.low_stock_threshold || 5) ? 'text-error' : 'text-base-content'}`}>
-                {inv.total_stock} units
-                {inv.total_stock <= (inv.low_stock_threshold || 5) && <AlertTriangle size={12} className="inline ml-1" />}
-              </span>
-            </div>
-          )}
-
           {/* Platform badges */}
           <div className="flex items-center gap-2">
             {ssPricing && <span className="inline-flex px-2 py-1 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-600 border border-indigo-100">Squarespace</span>}
             {ebPricing && <span className="inline-flex px-2 py-1 rounded-lg text-xs font-semibold bg-yellow-50 text-yellow-600 border border-yellow-100">eBay</span>}
             {ssPricing && ebPricing && <span className="text-xs text-success font-medium ml-1">✓ Shared stock</span>}
+          </div>
+
+          {/* Stock — editable */}
+          <div>
+            <label className="text-xs font-semibold text-base-content/50 uppercase tracking-wide block mb-2">
+              Stock Level
+              {inv && inv.total_stock <= (inv.low_stock_threshold || 5) && (
+                <span className="ml-2 text-orange-500 font-normal normal-case">⚠ Low stock</span>
+              )}
+            </label>
+            <div className="flex items-center gap-2 bg-base-200 rounded-xl px-4 py-3">
+              <input
+                type="number"
+                className="input input-ghost flex-1 p-0 h-auto text-base font-bold focus:outline-none bg-transparent"
+                placeholder="0"
+                value={stockValue}
+                onChange={e => setStockValue(e.target.value)}
+                step="1"
+                min="0"
+              />
+              <span className="text-base-content/40 text-sm">units</span>
+            </div>
+            <p className="text-xs text-base-content/30 mt-1 ml-1">Changing stock queues an update to both Squarespace and eBay</p>
           </div>
 
           {/* Cost Price */}
@@ -209,23 +232,14 @@ const MergeModal: React.FC<{
   const combinedStock = (invA?.total_stock ?? 0) + (invB?.total_stock ?? 0);
   const [stock, setStock] = useState(combinedStock);
 
-  const ssPrA = pricing.find(p => p.product_id === productA.id && p.platform === 'squarespace');
-  const ebPrA = pricing.find(p => p.product_id === productA.id && p.platform === 'ebay');
-  const ssPrB = pricing.find(p => p.product_id === productB.id && p.platform === 'squarespace');
-  const ebPrB = pricing.find(p => p.product_id === productB.id && p.platform === 'ebay');
-
-  // Work out what the merged product will have
-  const keepSS = pricing.find(p => p.product_id === keepId && p.platform === 'squarespace');
-  const keepEB = pricing.find(p => p.product_id === keepId && p.platform === 'ebay');
-  const removeSS = pricing.find(p => p.product_id === removeId && p.platform === 'squarespace');
-  const removeEB = pricing.find(p => p.product_id === removeId && p.platform === 'ebay');
-  const finalSS = keepSS || removeSS;
-  const finalEB = keepEB || removeEB;
+  const finalSS = pricing.find(p => p.product_id === keepId && p.platform === 'squarespace')
+    || pricing.find(p => p.product_id === removeId && p.platform === 'squarespace');
+  const finalEB = pricing.find(p => p.product_id === keepId && p.platform === 'ebay')
+    || pricing.find(p => p.product_id === removeId && p.platform === 'ebay');
 
   return (
     <div className="modal modal-open">
       <div className="modal-box max-w-xl p-0 overflow-hidden">
-        {/* Header */}
         <div className="flex items-center justify-between p-5 border-b border-base-200">
           <div className="flex items-center gap-2">
             <GitMerge size={18} className="text-primary" />
@@ -235,12 +249,10 @@ const MergeModal: React.FC<{
         </div>
 
         <div className="p-5 flex flex-col gap-5">
-          {/* Explanation */}
           <p className="text-sm text-base-content/60">
             These two products will become <strong>one product</strong> with a single shared stock level. Both Squarespace and eBay prices are kept. Every sale on either platform reduces the same stock counter.
           </p>
 
-          {/* Side-by-side selector */}
           <div className="grid grid-cols-2 gap-3">
             {[productA, productB].map(prod => {
               const isKeep = prod.id === keepId;
@@ -270,7 +282,6 @@ const MergeModal: React.FC<{
             })}
           </div>
 
-          {/* Result preview */}
           <div className="bg-base-200 rounded-xl p-4">
             <p className="text-xs font-semibold text-base-content/50 uppercase tracking-wide mb-3">Result — merged product</p>
             <div className="flex flex-col gap-2">
@@ -281,7 +292,6 @@ const MergeModal: React.FC<{
               <div className="flex flex-wrap gap-1.5">
                 {finalSS && <span className="px-2 py-1 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-600 border border-indigo-100">Squarespace £{Number(finalSS.price).toFixed(2)}</span>}
                 {finalEB && <span className="px-2 py-1 rounded-lg text-xs font-semibold bg-yellow-50 text-yellow-600 border border-yellow-100">eBay £{Number(finalEB.price).toFixed(2)}</span>}
-                {!finalSS && !finalEB && <span className="text-xs text-base-content/30 italic">No platform listings found</span>}
               </div>
               <div className="flex items-center gap-2 mt-1">
                 <span className="text-sm text-base-content/60">Shared stock:</span>
@@ -302,7 +312,6 @@ const MergeModal: React.FC<{
           </p>
         </div>
 
-        {/* Footer */}
         <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-base-200 bg-base-200/40">
           <button className="btn btn-ghost btn-sm" onClick={onClose}>Cancel</button>
           <button
@@ -330,11 +339,8 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
   const [newSku, setNewSku] = useState('');
   const [toast, setToast] = useState('');
   const [busy, setBusy] = useState(false);
-
-  // Checkbox selection for merge
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
 
-  // Apply the initialLowStockFilter on mount, then clear it
   React.useEffect(() => {
     if (initialLowStockFilter) {
       setShowLowStockOnly(true);
@@ -360,7 +366,6 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
       if (next.has(id)) next.delete(id);
       else if (next.size < 2) next.add(id);
       else {
-        // Replace the oldest selection (first one) with the new one
         const [first] = next;
         next.delete(first);
         next.add(id);
@@ -403,7 +408,7 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
       await mergeProducts(keepId, removeId, stock);
       setShowMerge(false);
       setCheckedIds(new Set());
-      showToast('Products merged successfully! They now share one stock level.');
+      showToast('Products merged! Stock update queued for both platforms.');
       onRefresh();
     } catch { showToast('Failed to merge — please try again.'); }
     finally { setBusy(false); }
@@ -415,7 +420,6 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
         <div className="bg-success/10 border border-success/30 text-success rounded-xl px-4 py-3 text-sm font-medium">✓ {toast}</div>
       )}
 
-      {/* Toolbar */}
       <div className="flex flex-wrap gap-2 items-center">
         <div className="flex items-center gap-2 bg-base-100 border border-base-300 rounded-xl px-3 py-2 flex-1 min-w-[180px] shadow-sm">
           <Search size={14} className="text-base-content/30 flex-shrink-0" />
@@ -430,20 +434,14 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
         <button
           className={`btn btn-sm gap-1.5 ${showLowStockOnly ? 'btn-error' : 'btn-ghost border border-base-300'}`}
           onClick={() => setShowLowStockOnly(v => !v)}
-          title="Show only low-stock items"
         >
           <AlertTriangle size={14} /> {showLowStockOnly ? 'Low Stock Only' : 'Low Stock'}
         </button>
         <button className="btn btn-primary btn-sm gap-1.5" onClick={() => setShowAdd(true)}>
           <Plus size={14} /> Add
         </button>
-
-        {/* Merge button — only visible when exactly 2 checked */}
         {checkedIds.size === 2 && (
-          <button
-            className="btn btn-secondary btn-sm gap-1.5 animate-pulse"
-            onClick={() => setShowMerge(true)}
-          >
+          <button className="btn btn-secondary btn-sm gap-1.5 animate-pulse" onClick={() => setShowMerge(true)}>
             <GitMerge size={14} /> Merge 2 selected
           </button>
         )}
@@ -453,10 +451,9 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
       </div>
 
       <p className="text-xs text-base-content/40">
-        {filtered.length} of {products.length} products · Click a row to edit prices · Tick checkboxes to merge duplicates
+        {filtered.length} of {products.length} products · Click a row to edit prices &amp; stock · Tick checkboxes to merge duplicates
       </p>
 
-      {/* Products Table */}
       {filtered.length === 0 ? (
         <div className="bg-base-100 rounded-xl border border-base-300 p-12 text-center shadow-sm">
           <p className="text-base-content/40 text-sm">{products.length === 0 ? 'No products yet — run a sync to import.' : 'No products match your search.'}</p>
@@ -468,7 +465,6 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
               <thead>
                 <tr className="bg-base-200/60 text-base-content/50 text-xs uppercase tracking-wide">
                   <th className="w-8">
-                    {/* Clear all checkboxes */}
                     {checkedIds.size > 0 && (
                       <button className="btn btn-ghost btn-xs" onClick={() => setCheckedIds(new Set())} title="Clear selection">
                         <X size={12} />
@@ -499,7 +495,6 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
                       className={`hover:bg-base-200/50 cursor-pointer transition-colors ${lowStock ? 'bg-orange-50/30' : ''} ${isChecked ? 'bg-primary/5 ring-1 ring-inset ring-primary/20' : ''}`}
                       onClick={() => setSelectedProduct(p)}
                     >
-                      {/* Checkbox */}
                       <td onClick={e => toggleCheck(p.id, e)} className="cursor-pointer">
                         <div className={`w-4 h-4 rounded border-2 flex items-center justify-center transition-all ${isChecked ? 'bg-primary border-primary' : 'border-base-300 hover:border-primary'}`}>
                           {isChecked && <svg width="10" height="8" viewBox="0 0 10 8" fill="none"><path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}
@@ -577,7 +572,7 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
         </div>
       )}
 
-      {/* Pricing Modal */}
+      {/* Pricing / Stock Modal */}
       {selectedProduct && (
         <PricingModal
           product={selectedProduct}
