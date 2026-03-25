@@ -25,7 +25,7 @@ function StatusBadge({ status }: { status: string }) {
   const s = (status || 'PENDING').toUpperCase();
   if (s === 'PENDING' || s === 'NOT_STARTED')
     return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-50 text-orange-600 border border-orange-100">Pending</span>;
-  if (s === 'SHIPPED' || s === 'IN_PROGRESS')
+  if (s === 'SHIPPED' || s === 'IN_PROGRESS' || s === 'TRACKING_PUSHED')
     return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-100">Shipped</span>;
   if (s === 'DELIVERED' || s === 'FULFILLED')
     return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-50 text-green-700 border border-green-100">Fulfilled</span>;
@@ -234,7 +234,7 @@ export const Orders: React.FC<OrdersProps> = ({ orders, onRefresh }) => {
     if (filterStatus !== 'all') {
       const s = (o.fulfillment_status || 'PENDING').toUpperCase();
       if (filterStatus === 'PENDING' && s !== 'PENDING' && s !== 'NOT_STARTED') return false;
-      if (filterStatus === 'SHIPPED' && s !== 'SHIPPED' && s !== 'IN_PROGRESS') return false;
+      if (filterStatus === 'SHIPPED' && s !== 'SHIPPED' && s !== 'IN_PROGRESS' && s !== 'TRACKING_PUSHED') return false;
       if (filterStatus === 'DELIVERED' && s !== 'DELIVERED' && s !== 'FULFILLED') return false;
     }
     if (search) {
