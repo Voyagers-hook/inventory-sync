@@ -62,14 +62,29 @@ class SquarespaceClient:
         return inventory
 
     def set_variant_stock(self, variant_id: str, new_qty: int):
-        """Set absolute stock level for a variant using an adjustment delta."""
-        # Fetch current to calculate delta
-        data = self._get("/commerce/inventory")
+        """Set absolute stock level for a variant using an adjustment delta.
+        Paginates through ALL inventory pages to find the correct current quantity.
+        Without pagination, the delta would be wrong for variants not on page 1.
+        """
         current_qty = 0
-        for item in data.get("inventory", []):
-            if item.get("variantId") == variant_id:
-                current_qty = item.get("quantity", 0)
+        cursor = None
+        found = False
+        while True:
+            params = {}
+            if cursor:
+                params["cursor"] = cursor
+            data = self._get("/commerce/inventory", params)
+            for item in data.get("inventory", []):
+                if item.get("variantId") == variant_id:
+                    current_qty = item.get("quantity", 0)
+                    found = True
+                    break
+            if found:
                 break
+            pagination = data.get("pagination", {})
+            if not pagination.get("hasNextPage"):
+                break
+            cursor = pagination.get("nextPageCursor")
         delta = new_qty - current_qty
         if delta == 0:
             logger.info(f"SS stock unchanged for variant {variant_id}")
