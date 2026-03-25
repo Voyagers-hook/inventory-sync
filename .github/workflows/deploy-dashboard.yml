@@ -39,6 +39,9 @@ jobs:
       - name: Build
         working-directory: ./dashboard
         run: npm run build
+        env:
+          VITE_GITHUB_TOKEN: ${{ secrets.DASHBOARD_GITHUB_TOKEN }}
+          VITE_GITHUB_REPO: Voyagers-hook/inventory-sync
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
