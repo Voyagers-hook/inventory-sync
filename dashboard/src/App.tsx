@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { LayoutDashboard, ShoppingCart, Package, BarChart3, TrendingUp, Settings as SettingsIcon } from 'lucide-react';
+import { LayoutDashboard, ShoppingCart, Package, BarChart3, TrendingUp, Settings as SettingsIcon, RefreshCw } from 'lucide-react';
 import type { TabName, Product, Inventory, Pricing, Order, SalesTrend, SyncLog, Setting } from './types';
 import { fetchProducts, fetchInventory, fetchPricing, fetchOrders, fetchSalesTrends, fetchSyncLogs, fetchSettings } from './utils/supabase';
 import { Dashboard } from './components/Dashboard';
@@ -10,17 +10,18 @@ import { Trends } from './components/Trends';
 import { Settings } from './components/Settings';
 
 const TABS: { id: TabName; label: string; icon: React.ReactElement }[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard size={16} /> },
-  { id: 'orders', label: 'Orders', icon: <ShoppingCart size={16} /> },
-  { id: 'products', label: 'Products', icon: <Package size={16} /> },
-  { id: 'sales', label: 'Sales', icon: <BarChart3 size={16} /> },
-  { id: 'trends', label: 'Trends', icon: <TrendingUp size={16} /> },
-  { id: 'settings', label: 'Settings', icon: <SettingsIcon size={16} /> },
+  { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard size={15} /> },
+  { id: 'orders', label: 'Orders', icon: <ShoppingCart size={15} /> },
+  { id: 'products', label: 'Products', icon: <Package size={15} /> },
+  { id: 'sales', label: 'Sales', icon: <BarChart3 size={15} /> },
+  { id: 'trends', label: 'Trends', icon: <TrendingUp size={15} /> },
+  { id: 'settings', label: 'Settings', icon: <SettingsIcon size={15} /> },
 ];
 
 const App: React.FC = () => {
   const [tab, setTab] = useState<TabName>('dashboard');
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [products, setProducts] = useState<Product[]>([]);
   const [inventory, setInventory] = useState<Inventory[]>([]);
   const [pricing, setPricing] = useState<Pricing[]>([]);
@@ -30,8 +31,9 @@ const App: React.FC = () => {
   const [settings, setSettings] = useState<Setting[]>([]);
   const [error, setError] = useState('');
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (isRefresh = false) => {
     setError('');
+    if (isRefresh) setRefreshing(true);
     try {
       const [prods, inv, pri, ords, trds, logs, setts] = await Promise.all([
         fetchProducts(),
@@ -51,67 +53,106 @@ const App: React.FC = () => {
       setSettings(setts);
     } catch (err) {
       console.error('Failed to load data:', err);
-      setError('Failed to connect to database. Please check your connection.');
+      setError('Failed to connect to database. Please refresh the page.');
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, []);
 
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+  useEffect(() => { loadData(); }, [loadData]);
+
+  const handleRefresh = useCallback(() => loadData(true), [loadData]);
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-screen bg-base-100">
+      <div className="flex items-center justify-center h-screen bg-base-200">
         <div className="flex flex-col items-center gap-4">
-          <span className="loading loading-spinner loading-lg text-primary" />
-          <p className="text-base-content/60">Loading inventory data...</p>
+          <img
+            src="https://raw.githubusercontent.com/Voyagers-hook/images/refs/heads/main/logo%20trans.png"
+            alt="Voyagers Hook"
+            className="w-20 h-20 object-contain animate-pulse"
+          />
+          <p className="text-base-content/50 text-sm">Loading inventory data...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col h-screen bg-base-100">
+    <div className="flex flex-col h-screen bg-base-200">
       {/* Header */}
-      <div className="bg-base-200 border-b border-base-300 px-4 py-2 flex items-center gap-3">
-        <span className="text-xl">📦</span>
-        <span className="font-bold text-sm">Voyagers Hook — Inventory Tracker</span>
-      </div>
+      <header className="bg-base-100 border-b border-base-300 px-4 py-2.5 flex items-center justify-between flex-shrink-0 shadow-sm">
+        <div className="flex items-center gap-3">
+          <img
+            src="https://raw.githubusercontent.com/Voyagers-hook/images/refs/heads/main/logo%20trans.png"
+            alt="Voyagers Hook"
+            className="w-9 h-9 object-contain"
+          />
+          <div>
+            <h1 className="font-bold text-sm leading-tight text-base-content">Voyagers Hook</h1>
+            <p className="text-xs text-base-content/40 leading-tight">Inventory Tracker</p>
+          </div>
+        </div>
+        <button
+          className="btn btn-ghost btn-sm gap-1.5 text-base-content/60"
+          onClick={handleRefresh}
+          disabled={refreshing}
+        >
+          <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
+          <span className="hidden sm:inline text-xs">{refreshing ? 'Refreshing...' : 'Refresh'}</span>
+        </button>
+      </header>
 
-      {/* Tabs */}
-      <div className="bg-base-200 border-b border-base-300 sticky top-0 z-10">
-        <div className="flex overflow-x-auto px-2 py-1 gap-1">
+      {/* Navigation */}
+      <nav className="bg-base-100 border-b border-base-300 flex-shrink-0">
+        <div className="flex overflow-x-auto">
           {TABS.map(t => (
             <button
               key={t.id}
-              className={`btn btn-sm gap-1 whitespace-nowrap ${tab === t.id ? 'btn-primary' : 'btn-ghost'}`}
               onClick={() => setTab(t.id)}
+              className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium whitespace-nowrap border-b-2 transition-all ${
+                tab === t.id
+                  ? 'border-primary text-primary bg-primary/5'
+                  : 'border-transparent text-base-content/50 hover:text-base-content hover:bg-base-200'
+              }`}
             >
               {t.icon}
-              <span>{t.label}</span>
+              {t.label}
             </button>
           ))}
         </div>
-      </div>
+      </nav>
 
       {/* Error Banner */}
       {error && (
-        <div className="alert alert-error text-sm py-2 mx-3 mt-3">
-          {error}
+        <div className="bg-error/10 border-b border-error/20 px-4 py-2 text-error text-sm flex-shrink-0">
+          ⚠️ {error}
         </div>
       )}
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-3">
-        {tab === 'dashboard' && <Dashboard products={products} inventory={inventory} pricing={pricing} orders={orders} syncLogs={syncLogs} settings={settings} onRefresh={loadData} />}
-        {tab === 'orders' && <Orders orders={orders} onRefresh={loadData} />}
-        {tab === 'products' && <Products products={products} inventory={inventory} pricing={pricing} onRefresh={loadData} />}
-        {tab === 'sales' && <Sales orders={orders} products={products} />}
-        {tab === 'trends' && <Trends products={products} inventory={inventory} orders={orders} trends={trends} />}
-        {tab === 'settings' && <Settings settings={settings} onRefresh={loadData} />}
-      </div>
+      <main className="flex-1 overflow-y-auto">
+        <div className="max-w-4xl mx-auto p-4">
+          {tab === 'dashboard' && (
+            <Dashboard
+              products={products}
+              inventory={inventory}
+              pricing={pricing}
+              orders={orders}
+              syncLogs={syncLogs}
+              settings={settings}
+              onRefresh={handleRefresh}
+              onNavigate={setTab}
+            />
+          )}
+          {tab === 'orders' && <Orders orders={orders} onRefresh={handleRefresh} />}
+          {tab === 'products' && <Products products={products} inventory={inventory} pricing={pricing} onRefresh={handleRefresh} />}
+          {tab === 'sales' && <Sales orders={orders} products={products} />}
+          {tab === 'trends' && <Trends products={products} inventory={inventory} orders={orders} trends={trends} />}
+          {tab === 'settings' && <Settings settings={settings} onRefresh={handleRefresh} />}
+        </div>
+      </main>
     </div>
   );
 };

@@ -165,13 +165,13 @@ class EbayClient:
         created_after: ISO8601 string e.g. '2024-01-15T10:00:00.000Z'
         """
         orders, offset, limit = [], 0, 50
-        filter_str = None
-        if created_after:
-            filter_str = f"creationdate:[{created_after}..] ,orderfulfillmentstatus:{{NOT_STARTED|IN_PROGRESS}}"
         while True:
             params = {"limit": limit, "offset": offset}
-            if filter_str:
-                params["filter"] = filter_str
+            if created_after:
+                # Only filter by date — include ALL fulfillment statuses so we
+                # capture orders that were completed same-day (eBay often marks
+                # them fulfilled immediately upon payment)
+                params["filter"] = f"creationdate:[{created_after}..]"
             r = requests.get(
                 f"{BASE_URL}/sell/fulfillment/v1/order",
                 headers=self._headers(), params=params, timeout=30,

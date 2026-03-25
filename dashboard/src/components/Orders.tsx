@@ -10,69 +10,63 @@ interface OrdersProps {
 
 function formatDate(d: string): string {
   if (!d) return '—';
-  const date = new Date(d);
-  return date.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-function platformBadge(platform: string): React.ReactElement {
-  if (platform?.toLowerCase().includes('squarespace')) {
-    return <span className="badge badge-neutral badge-sm">Squarespace</span>;
-  }
-  if (platform?.toLowerCase().includes('ebay')) {
-    return <span className="badge badge-warning badge-sm">eBay</span>;
-  }
-  return <span className="badge badge-ghost badge-sm">{platform || '—'}</span>;
+function PlatformBadge({ platform }: { platform: string }) {
+  if (platform?.toLowerCase().includes('squarespace'))
+    return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-100">Squarespace</span>;
+  if (platform?.toLowerCase().includes('ebay'))
+    return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-50 text-yellow-700 border border-yellow-100">eBay</span>;
+  return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">{platform || '—'}</span>;
 }
 
-function statusBadge(status: string): React.ReactElement {
-  switch (status?.toUpperCase()) {
-    case 'PENDING': return <span className="badge badge-warning badge-sm">Pending</span>;
-    case 'SHIPPED': return <span className="badge badge-info badge-sm">Shipped</span>;
-    case 'DELIVERED': return <span className="badge badge-success badge-sm">Delivered</span>;
-    default: return <span className="badge badge-ghost badge-sm">{status || 'Pending'}</span>;
-  }
+function StatusBadge({ status }: { status: string }) {
+  const s = (status || 'PENDING').toUpperCase();
+  if (s === 'PENDING' || s === 'NOT_STARTED')
+    return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-50 text-orange-600 border border-orange-100">Pending</span>;
+  if (s === 'SHIPPED' || s === 'IN_PROGRESS')
+    return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-100">Shipped</span>;
+  if (s === 'DELIVERED' || s === 'FULFILLED')
+    return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-50 text-green-700 border border-green-100">Fulfilled</span>;
+  return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">{status || 'Pending'}</span>;
 }
 
 const CARRIERS = ['Royal Mail', 'DPD', 'Hermes/Evri', 'DHL', 'UPS', 'FedEx', 'Yodel', 'ParcelForce', 'Other'];
 
 const CopyButton: React.FC<{ text: string }> = ({ text }) => {
   const [copied, setCopied] = useState(false);
-
   const handleCopy = useCallback(async () => {
     if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
     } catch {
-      // Fallback
       const ta = document.createElement('textarea');
       ta.value = text;
       document.body.appendChild(ta);
       ta.select();
       document.execCommand('copy');
       document.body.removeChild(ta);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
     }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   }, [text]);
-
   if (!text) return null;
   return (
-    <button className="btn btn-ghost btn-xs px-1" onClick={handleCopy} title="Copy">
-      {copied ? <Check size={12} className="text-success" /> : <Copy size={12} className="opacity-60" />}
+    <button className="p-1 rounded hover:bg-base-300 transition-colors ml-1" onClick={handleCopy} title="Copy">
+      {copied ? <Check size={11} className="text-success" /> : <Copy size={11} className="text-base-content/30" />}
     </button>
   );
 };
 
-const OrderRow: React.FC<{ order: Order; onUpdate: () => void }> = ({ order, onUpdate }) => {
+const OrderCard: React.FC<{ order: Order; onUpdate: () => void }> = ({ order, onUpdate }) => {
   const [expanded, setExpanded] = useState(false);
   const [trackingNumber, setTrackingNumber] = useState(order.tracking_number || '');
   const [trackingCarrier, setTrackingCarrier] = useState(order.tracking_carrier || 'Royal Mail');
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState('');
 
-  const handleUpdateTracking = useCallback(async () => {
+  const handleSaveTracking = useCallback(async () => {
     if (!trackingNumber.trim()) return;
     setSaving(true);
     try {
@@ -81,11 +75,10 @@ const OrderRow: React.FC<{ order: Order; onUpdate: () => void }> = ({ order, onU
         tracking_carrier: trackingCarrier,
         fulfillment_status: 'SHIPPED',
       });
-      setToast('Tracking saved! Will sync to platform next run.');
+      setToast('Tracking saved — will sync to platform on next run.');
       setTimeout(() => setToast(''), 3000);
       onUpdate();
-    } catch (err) {
-      console.error('Failed to update tracking:', err);
+    } catch {
       setToast('Failed to save tracking');
       setTimeout(() => setToast(''), 3000);
     } finally {
@@ -104,63 +97,74 @@ const OrderRow: React.FC<{ order: Order; onUpdate: () => void }> = ({ order, onU
   ].filter(l => l.value);
 
   return (
-    <div className="card bg-base-200 mb-2">
+    <div className="bg-base-100 rounded-xl border border-base-300 shadow-sm overflow-hidden">
+      {/* Header row */}
       <div
-        className="flex items-center gap-2 p-3 cursor-pointer hover:bg-base-300 rounded-t-xl transition-colors"
+        className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-base-200/50 transition-colors"
         onClick={() => setExpanded(!expanded)}
       >
-        <div className="flex-1 flex flex-wrap items-center gap-2">
-          <span className="font-mono text-xs font-semibold">{order.order_number || order.platform_order_id || '—'}</span>
-          {platformBadge(order.platform)}
-          {statusBadge(order.fulfillment_status)}
+        <div className="flex-1 flex flex-wrap items-center gap-2 min-w-0">
+          <span className="font-mono text-xs font-semibold text-base-content/70">
+            {order.order_number || order.platform_order_id?.slice(0, 12) || '—'}
+          </span>
+          <PlatformBadge platform={order.platform} />
+          <StatusBadge status={order.fulfillment_status} />
+          {order.customer_name && (
+            <span className="text-sm text-base-content/70 hidden sm:inline truncate max-w-[150px]">{order.customer_name}</span>
+          )}
         </div>
-        <div className="flex items-center gap-3 text-sm">
-          <span className="text-base-content/60 text-xs hidden sm:inline">{formatDate(order.ordered_at)}</span>
-          <span className="font-semibold">£{Number(order.order_total || order.unit_price || 0).toFixed(2)}</span>
-          {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+        <div className="flex items-center gap-3 flex-shrink-0">
+          <span className="text-xs text-base-content/40 hidden sm:inline">{formatDate(order.ordered_at)}</span>
+          <span className="font-bold text-sm text-base-content">£{Number(order.order_total || order.unit_price || 0).toFixed(2)}</span>
+          {expanded ? <ChevronUp size={15} className="text-base-content/30" /> : <ChevronDown size={15} className="text-base-content/30" />}
         </div>
       </div>
 
+      {/* Expanded content */}
       {expanded && (
-        <div className="p-3 pt-0 flex flex-col gap-3 border-t border-base-300">
-          {toast && <div className="alert alert-success text-xs py-1">{toast}</div>}
+        <div className="px-4 pb-4 border-t border-base-200 flex flex-col gap-4 pt-4">
+          {toast && (
+            <div className={`rounded-xl px-3 py-2 text-xs font-medium ${toast.includes('Failed') ? 'bg-error/10 text-error' : 'bg-success/10 text-success'}`}>
+              {toast}
+            </div>
+          )}
 
-          {/* Order info */}
-          <div className="grid grid-cols-2 gap-2 text-sm">
+          {/* Order details */}
+          <div className="grid grid-cols-2 gap-3 text-sm">
             <div>
-              <span className="text-base-content/60 text-xs">Customer</span>
-              <div className="flex items-center gap-1">
-                <span>{order.customer_name || '—'}</span>
+              <p className="text-xs text-base-content/40 mb-0.5">Customer</p>
+              <div className="flex items-center">
+                <span className="font-medium">{order.customer_name || '—'}</span>
                 <CopyButton text={order.customer_name} />
               </div>
             </div>
             <div>
-              <span className="text-base-content/60 text-xs">Email</span>
-              <div className="flex items-center gap-1">
+              <p className="text-xs text-base-content/40 mb-0.5">Email</p>
+              <div className="flex items-center">
                 <span className="text-xs break-all">{order.customer_email || '—'}</span>
                 <CopyButton text={order.customer_email} />
               </div>
             </div>
             <div>
-              <span className="text-base-content/60 text-xs">Item</span>
-              <div>{order.item_name || '—'}</div>
+              <p className="text-xs text-base-content/40 mb-0.5">Item</p>
+              <span>{order.item_name || order.sku || '—'}</span>
             </div>
             <div>
-              <span className="text-base-content/60 text-xs">Qty</span>
-              <div>{order.quantity}</div>
+              <p className="text-xs text-base-content/40 mb-0.5">Qty × Price</p>
+              <span>{order.quantity} × £{Number(order.unit_price || 0).toFixed(2)}</span>
             </div>
           </div>
 
-          {/* Shipping Address */}
+          {/* Address */}
           {addressLines.length > 0 && (
             <div>
-              <span className="text-base-content/60 text-xs uppercase tracking-wide">Shipping Address</span>
-              <div className="flex flex-col gap-1 mt-1 bg-base-300 rounded-lg p-2">
+              <p className="text-xs text-base-content/40 uppercase tracking-wide mb-2">Shipping Address</p>
+              <div className="bg-base-200 rounded-xl p-3 flex flex-col gap-1.5">
                 {addressLines.map((line, i) => (
                   <div key={i} className="flex items-center justify-between text-sm">
                     <div className="flex items-center gap-2">
-                      <span className="text-base-content/60 text-xs w-16">{line.label}:</span>
-                      <span>{line.value}</span>
+                      <span className="text-xs text-base-content/40 w-14 flex-shrink-0">{line.label}</span>
+                      <span className="font-medium">{line.value}</span>
                     </div>
                     <CopyButton text={line.value} />
                   </div>
@@ -171,17 +175,17 @@ const OrderRow: React.FC<{ order: Order; onUpdate: () => void }> = ({ order, onU
 
           {/* Tracking */}
           <div>
-            <span className="text-base-content/60 text-xs uppercase tracking-wide">Tracking</span>
+            <p className="text-xs text-base-content/40 uppercase tracking-wide mb-2">Tracking</p>
             {order.tracking_number ? (
-              <div className="flex items-center gap-2 mt-1 bg-base-300 rounded-lg p-2 text-sm">
-                <Truck size={14} className="opacity-60" />
+              <div className="bg-base-200 rounded-xl p-3 flex items-center gap-3 text-sm">
+                <Truck size={14} className="text-base-content/40" />
                 <span className="font-semibold">{order.tracking_carrier || 'Unknown'}</span>
-                <span className="font-mono">{order.tracking_number}</span>
+                <span className="font-mono text-base-content/70">{order.tracking_number}</span>
                 <CopyButton text={order.tracking_number} />
-                {statusBadge(order.fulfillment_status)}
+                <StatusBadge status={order.fulfillment_status} />
               </div>
             ) : (
-              <div className="flex flex-col gap-2 mt-1">
+              <div className="flex flex-col gap-2">
                 <div className="flex gap-2">
                   <input
                     type="text"
@@ -199,12 +203,12 @@ const OrderRow: React.FC<{ order: Order; onUpdate: () => void }> = ({ order, onU
                   </select>
                 </div>
                 <button
-                  className="btn btn-primary btn-sm self-start"
-                  onClick={handleUpdateTracking}
+                  className="btn btn-primary btn-sm self-start gap-1.5"
+                  onClick={handleSaveTracking}
                   disabled={saving || !trackingNumber.trim()}
                 >
-                  <Truck size={14} />
-                  {saving ? 'Saving...' : 'Update Tracking'}
+                  <Truck size={13} />
+                  {saving ? 'Saving...' : 'Add Tracking'}
                 </button>
               </div>
             )}
@@ -222,31 +226,36 @@ export const Orders: React.FC<OrdersProps> = ({ orders, onRefresh }) => {
 
   const filtered = orders.filter(o => {
     if (filterPlatform !== 'all' && !o.platform?.toLowerCase().includes(filterPlatform)) return false;
-    if (filterStatus !== 'all' && (o.fulfillment_status || 'PENDING').toUpperCase() !== filterStatus) return false;
+    if (filterStatus !== 'all') {
+      const s = (o.fulfillment_status || 'PENDING').toUpperCase();
+      if (filterStatus === 'PENDING' && s !== 'PENDING' && s !== 'NOT_STARTED') return false;
+      if (filterStatus === 'SHIPPED' && s !== 'SHIPPED' && s !== 'IN_PROGRESS') return false;
+      if (filterStatus === 'DELIVERED' && s !== 'DELIVERED' && s !== 'FULFILLED') return false;
+    }
     if (search) {
       const q = search.toLowerCase();
-      const matchName = o.customer_name?.toLowerCase().includes(q);
-      const matchOrder = o.order_number?.toLowerCase().includes(q);
-      const matchPlatformOrder = o.platform_order_id?.toLowerCase().includes(q);
-      if (!matchName && !matchOrder && !matchPlatformOrder) return false;
+      if (!o.customer_name?.toLowerCase().includes(q) &&
+          !o.order_number?.toLowerCase().includes(q) &&
+          !o.platform_order_id?.toLowerCase().includes(q) &&
+          !o.item_name?.toLowerCase().includes(q)) return false;
     }
     return true;
   });
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-4">
       {/* Filters */}
-      <div className="flex flex-wrap gap-2">
-        <label className="input input-bordered input-sm flex items-center gap-2 flex-1 min-w-[150px]">
-          <Search size={14} className="opacity-60" />
+      <div className="bg-base-100 rounded-xl border border-base-300 p-3 shadow-sm flex flex-wrap gap-2">
+        <div className="flex items-center gap-2 bg-base-200 rounded-lg px-3 py-2 flex-1 min-w-[160px]">
+          <Search size={13} className="text-base-content/30 flex-shrink-0" />
           <input
             type="search"
-            className="grow"
-            placeholder="Search name or order #..."
+            className="bg-transparent outline-none text-sm flex-1 placeholder:text-base-content/30"
+            placeholder="Search orders..."
             value={search}
             onChange={e => setSearch(e.target.value)}
           />
-        </label>
+        </div>
         <select className="select select-bordered select-sm" value={filterPlatform} onChange={e => setFilterPlatform(e.target.value)}>
           <option value="all">All Platforms</option>
           <option value="squarespace">Squarespace</option>
@@ -256,28 +265,25 @@ export const Orders: React.FC<OrdersProps> = ({ orders, onRefresh }) => {
           <option value="all">All Statuses</option>
           <option value="PENDING">Pending</option>
           <option value="SHIPPED">Shipped</option>
-          <option value="DELIVERED">Delivered</option>
+          <option value="DELIVERED">Fulfilled</option>
         </select>
       </div>
 
-      {/* Order count */}
-      <div className="text-xs text-base-content/60">
-        {filtered.length} order{filtered.length !== 1 ? 's' : ''} {search || filterPlatform !== 'all' || filterStatus !== 'all' ? '(filtered)' : ''}
-      </div>
+      <p className="text-xs text-base-content/40">
+        {filtered.length} order{filtered.length !== 1 ? 's' : ''}
+        {(search || filterPlatform !== 'all' || filterStatus !== 'all') ? ' (filtered)' : ''}
+      </p>
 
-      {/* Orders list */}
       {filtered.length === 0 ? (
-        <div className="card bg-base-200">
-          <div className="card-body items-center text-center p-8">
-            <p className="text-base-content/60">
-              {orders.length === 0
-                ? "No orders yet — they'll appear after the first sync runs."
-                : 'No orders match your filters.'}
-            </p>
-          </div>
+        <div className="bg-base-100 rounded-xl border border-base-300 p-12 text-center shadow-sm">
+          <p className="text-base-content/40 text-sm">
+            {orders.length === 0 ? "No orders yet — they'll appear after the first sync." : 'No orders match your filters.'}
+          </p>
         </div>
       ) : (
-        filtered.map(o => <OrderRow key={o.id} order={o} onUpdate={onRefresh} />)
+        <div className="flex flex-col gap-2">
+          {filtered.map(o => <OrderCard key={o.id} order={o} onUpdate={onRefresh} />)}
+        </div>
       )}
     </div>
   );
