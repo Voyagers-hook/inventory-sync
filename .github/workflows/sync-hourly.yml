@@ -24,9 +24,10 @@ jobs:
         working-directory: sync
         run: python main.py --mode full
         env:
-          SQUARESPACE_API_KEY:  ${{ secrets.SQUARESPACE_API_KEY }}
-          EBAY_APP_ID:          ${{ secrets.EBAY_APP_ID }}
-          EBAY_CERT_ID:         ${{ secrets.EBAY_CERT_ID }}
-          EBAY_REFRESH_TOKEN:   ${{ secrets.EBAY_REFRESH_TOKEN }}
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SQUARESPACE_API_KEY:    ${{ secrets.SQUARESPACE_API_KEY }}
+          EBAY_APP_ID:            ${{ secrets.EBAY_APP_ID }}
+          EBAY_CERT_ID:           ${{ secrets.EBAY_CERT_ID }}
+          EBAY_REFRESH_TOKEN:     ${{ secrets.EBAY_REFRESH_TOKEN }}
+          SUPABASE_URL:           ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY:   ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_DB_PASSWORD:   ${{ secrets.SUPABASE_DB_PASSWORD }}
