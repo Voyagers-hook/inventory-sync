@@ -54,8 +54,22 @@ export async function updateSetting(key: string, value: string): Promise<void> {
 }
 
 export async function updateInventory(productId: string, data: Partial<Inventory>): Promise<void> {
-  const { error } = await supabase.from('inventory').update({ ...data, updated_at: new Date().toISOString() }).eq('product_id', productId);
+  const { error } = await supabase
+    .from('inventory')
+    .update({ ...data, updated_at: new Date().toISOString() })
+    .eq('product_id', productId);
   if (error) throw error;
+
+  // If stock is being changed, queue a push to both platforms on next sync.
+  // The sync reads stock_push_{productId} keys and pushes ONLY those products.
+  if (data.total_stock !== undefined) {
+    await supabase
+      .from('settings')
+      .upsert(
+        { key: `stock_push_${productId}`, value: String(data.total_stock) },
+        { onConflict: 'key' }
+      );
+  }
 }
 
 export async function updatePricing(id: string, price: number): Promise<void> {
@@ -98,7 +112,7 @@ export async function deleteProduct(id: string): Promise<void> {
 }
 
 export async function mergeProducts(keepId: string, removeId: string, keepStock: number): Promise<void> {
-  // Get pricing for product to remove
+  // Transfer pricing from removed product to kept product (only if kept product doesn't already have that platform)
   const { data: removedPricing } = await supabase.from('platform_pricing').select('*').eq('product_id', removeId);
   if (removedPricing) {
     for (const p of removedPricing) {
@@ -108,12 +122,12 @@ export async function mergeProducts(keepId: string, removeId: string, keepStock:
       }
     }
   }
-  // Move orders and trends
+  // Move orders and trends to kept product
   await supabase.from('orders').update({ product_id: keepId }).eq('product_id', removeId);
   await supabase.from('sales_trends').update({ product_id: keepId }).eq('product_id', removeId);
-  // Update stock
+  // Update stock (this also queues a stock push to both platforms)
   await updateInventory(keepId, { total_stock: keepStock });
-  // Delete old product
+  // Delete removed product
   await supabase.from('platform_pricing').delete().eq('product_id', removeId);
   await supabase.from('inventory').delete().eq('product_id', removeId);
   await supabase.from('products').delete().eq('id', removeId);
