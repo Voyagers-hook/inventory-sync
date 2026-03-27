@@ -118,6 +118,7 @@ class SyncEngine:
             customer_name = f"{shipping.get('firstName', '')} {shipping.get('lastName', '')}".strip()
             customer_email = order.get("customerEmail", "")
 
+            order_saved = False
             for line in order.get("lineItems", []):
                 variant_id = line.get("variantId")
                 qty_sold   = int(line.get("quantity", 1))
@@ -125,39 +126,43 @@ class SyncEngine:
                 price      = float(line.get("unitPricePaid", {}).get("value", 0))
                 product    = self.db.get_product_by_sku(sku)
                 if not product:
-                    logger.warning(f"SKU {sku} not in DB, skipping")
-                    continue
-                self.db.insert_order({
-                    "platform": "squarespace",
-                    "platform_order_id": order_id,
-                    "product_id": product["id"],
-                    "sku": sku,
-                    "quantity": qty_sold,
-                    "unit_price": price,
-                    "currency": "GBP",
-                    "status": status,
-                    "ordered_at": order.get("createdOn"),
-                    "customer_name": customer_name,
-                    "customer_email": customer_email,
-                    "shipping_address_line1": shipping.get("address1", ""),
-                    "shipping_address_line2": shipping.get("address2", ""),
-                    "shipping_city": shipping.get("city", ""),
-                    "shipping_county": shipping.get("state", ""),
-                    "shipping_postcode": shipping.get("postalCode", ""),
-                    "shipping_country": shipping.get("countryCode", ""),
-                    "fulfillment_status": status,
-                    "order_total": float(order.get("grandTotal", {}).get("value", 0)),
-                    "item_name": line.get("productName", ""),
-                    "order_number": order.get("orderNumber", ""),
-                })
-                # Deduct stock in DB, then queue a push to both platforms
-                inv_rows = self.db.get_inventory(product["id"])
-                if inv_rows:
-                    inv = inv_rows[0]
-                    new_stock = max(0, inv["total_stock"] - qty_sold)
-                    self.db.upsert_inventory({"id": inv["id"], "product_id": product["id"], "total_stock": new_stock})
-                    self.db.queue_stock_push(product["id"], new_stock)
-                    logger.info(f"SS sale: {sku} qty={qty_sold} → stock now {new_stock} (queued push)")
+                    logger.warning(f"SS SKU {sku} not in DB — saving order without product link")
+
+                if not order_saved:
+                    # Only insert once per order (first line item wins for order record)
+                    self.db.insert_order({
+                        "platform": "squarespace",
+                        "platform_order_id": order_id,
+                        "product_id": product["id"] if product else None,
+                        "sku": sku,
+                        "quantity": qty_sold,
+                        "unit_price": price,
+                        "currency": "GBP",
+                        "status": status,
+                        "ordered_at": order.get("createdOn"),
+                        "customer_name": customer_name,
+                        "customer_email": customer_email,
+                        "shipping_address_line1": shipping.get("address1", ""),
+                        "shipping_address_line2": shipping.get("address2", ""),
+                        "shipping_city": shipping.get("city", ""),
+                        "shipping_county": shipping.get("state", ""),
+                        "shipping_postcode": shipping.get("postalCode", ""),
+                        "shipping_country": shipping.get("countryCode", ""),
+                        "fulfillment_status": status,
+                        "order_total": float(order.get("grandTotal", {}).get("value", 0)),
+                        "item_name": line.get("productName", ""),
+                        "order_number": order.get("orderNumber", ""),
+                    })
+                    order_saved = True
+
+                if product:
+                    inv_rows = self.db.get_inventory(product["id"])
+                    if inv_rows:
+                        inv = inv_rows[0]
+                        new_stock = max(0, inv["total_stock"] - qty_sold)
+                        self.db.upsert_inventory({"id": inv["id"], "product_id": product["id"], "total_stock": new_stock})
+                        self.db.queue_stock_push(product["id"], new_stock)
+                        logger.info(f"SS sale: {sku} qty={qty_sold} → stock now {new_stock} (queued push)")
             processed += 1
         logger.info(f"SS orders processed: {processed}")
         return processed
@@ -169,23 +174,26 @@ class SyncEngine:
         orders = self.ebay.get_orders(created_after=reconcile_since)
         processed = 0
 
-        # ── Pass 1: Reconcile statuses ──
+        # ── Pass 1: Reconcile statuses for orders already in DB ──────────────
         for order in orders:
             order_id = order.get("orderId")
             if not self.db.order_exists("ebay", order_id):
                 continue
             cancel_state = order.get("cancelStatus", {}).get("cancelState", "NONE_REQUESTED")
-            if cancel_state == "CANCELLED":
+            # CANCEL_ACCEPTED = seller agreed to cancel, treat same as CANCELLED
+            if cancel_state in ("CANCELLED", "CANCEL_ACCEPTED"):
                 self.db.update_order_status(order_id, "CANCELLED")
+                logger.info(f"Reconciled eBay order {order_id} → CANCELLED (state: {cancel_state})")
             else:
                 ebay_status = order.get("orderFulfillmentStatus", "NOT_STARTED")
                 self.db.update_order_status(order_id, ebay_status)
 
-        # ── Pass 2: Import new orders ──
+        # ── Pass 2: Import new orders ─────────────────────────────────────────
         for order in orders:
             order_id = order.get("orderId")
             cancel_state = order.get("cancelStatus", {}).get("cancelState", "NONE_REQUESTED")
-            if cancel_state == "CANCELLED":
+            # Skip cancelled orders — don't import them
+            if cancel_state in ("CANCELLED", "CANCEL_ACCEPTED"):
                 continue
             if self.db.order_exists("ebay", order_id):
                 continue
@@ -196,45 +204,61 @@ class SyncEngine:
             address = ship_to.get("contactAddress", {})
             buyer_info = order.get("buyer", {})
 
+            order_saved = False
             for line in order.get("lineItems", []):
-                sku      = line.get("sku", "")
-                qty_sold = int(line.get("quantity", 1))
-                price    = float(line.get("lineItemCost", {}).get("value", 0))
-                product  = self.db.get_product_by_sku(sku)
+                sku            = line.get("sku", "")
+                legacy_item_id = line.get("legacyItemId", "")
+                qty_sold       = int(line.get("quantity", 1))
+                price          = float(line.get("lineItemCost", {}).get("value", 0))
+
+                # ── Product lookup: SKU first, then by eBay item ID ───────────
+                product = self.db.get_product_by_sku(sku) if sku else None
+
+                if not product and legacy_item_id:
+                    product = self.db.get_product_by_platform_id("ebay", legacy_item_id)
+                    if product:
+                        logger.info(f"eBay order: resolved item {legacy_item_id} → product {product['id']} via platform_id lookup")
+
                 if not product:
-                    logger.warning(f"eBay SKU {sku} not in DB, skipping")
-                    continue
-                self.db.insert_order({
-                    "platform": "ebay",
-                    "platform_order_id": order_id,
-                    "product_id": product["id"],
-                    "sku": sku,
-                    "quantity": qty_sold,
-                    "unit_price": price,
-                    "currency": "GBP",
-                    "status": order.get("orderFulfillmentStatus", "NOT_STARTED"),
-                    "ordered_at": order.get("creationDate"),
-                    "customer_name": contact,
-                    "customer_email": buyer_info.get("username", "") + "@ebay.com",
-                    "shipping_address_line1": address.get("addressLine1", ""),
-                    "shipping_address_line2": address.get("addressLine2", ""),
-                    "shipping_city": address.get("city", ""),
-                    "shipping_county": address.get("stateOrProvince", ""),
-                    "shipping_postcode": address.get("postalCode", ""),
-                    "shipping_country": address.get("countryCode", ""),
-                    "fulfillment_status": order.get("orderFulfillmentStatus", "NOT_STARTED"),
-                    "order_total": float(order.get("totalFeeBasisAmount", {}).get("value", 0)),
-                    "item_name": line.get("title", ""),
-                    "order_number": order.get("orderId", ""),
-                })
-                # Deduct stock in DB, then queue a push to both platforms
-                inv_rows = self.db.get_inventory(product["id"])
-                if inv_rows:
-                    inv = inv_rows[0]
-                    new_stock = max(0, inv["total_stock"] - qty_sold)
-                    self.db.upsert_inventory({"id": inv["id"], "product_id": product["id"], "total_stock": new_stock})
-                    self.db.queue_stock_push(product["id"], new_stock)
-                    logger.info(f"eBay sale: {sku} qty={qty_sold} → stock now {new_stock} (queued push)")
+                    logger.warning(f"eBay SKU '{sku}' / item {legacy_item_id} not in DB — saving order without product link")
+
+                # ── Always save the order (product_id may be null) ────────────
+                if not order_saved:
+                    self.db.insert_order({
+                        "platform": "ebay",
+                        "platform_order_id": order_id,
+                        "product_id": product["id"] if product else None,
+                        "sku": sku,
+                        "quantity": qty_sold,
+                        "unit_price": price,
+                        "currency": "GBP",
+                        "status": order.get("orderFulfillmentStatus", "NOT_STARTED"),
+                        "ordered_at": order.get("creationDate"),
+                        "customer_name": contact,
+                        "customer_email": buyer_info.get("username", "") + "@ebay.com",
+                        "shipping_address_line1": address.get("addressLine1", ""),
+                        "shipping_address_line2": address.get("addressLine2", ""),
+                        "shipping_city": address.get("city", ""),
+                        "shipping_county": address.get("stateOrProvince", ""),
+                        "shipping_postcode": address.get("postalCode", ""),
+                        "shipping_country": address.get("countryCode", ""),
+                        "fulfillment_status": order.get("orderFulfillmentStatus", "NOT_STARTED"),
+                        "order_total": float(order.get("totalFeeBasisAmount", {}).get("value", 0)),
+                        "item_name": line.get("title", ""),
+                        "order_number": order.get("orderId", ""),
+                    })
+                    order_saved = True
+
+                # ── Only deduct stock if product was matched ──────────────────
+                if product:
+                    inv_rows = self.db.get_inventory(product["id"])
+                    if inv_rows:
+                        inv = inv_rows[0]
+                        new_stock = max(0, inv["total_stock"] - qty_sold)
+                        self.db.upsert_inventory({"id": inv["id"], "product_id": product["id"], "total_stock": new_stock})
+                        self.db.queue_stock_push(product["id"], new_stock)
+                        logger.info(f"eBay sale: {sku} qty={qty_sold} → stock now {new_stock} (queued push)")
+
             processed += 1
 
         logger.info(f"eBay orders processed: {processed} new, statuses reconciled for all 90-day orders")
@@ -320,6 +344,7 @@ class SyncEngine:
 
         logger.info(f"Stock push complete: {pushed} platform update(s) for {len(queue)} product(s)")
         return pushed
+
     def update_daily_snapshots(self):
         today = datetime.now(timezone.utc).date().isoformat()
         orders = self.db.get_orders(limit=500)
