@@ -134,7 +134,7 @@ const App: React.FC = () => {
 
       {/* Content */}
       <main className="flex-1 overflow-y-auto">
-        <div className="max-w-4xl mx-auto p-4">
+        <div className="max-w-screen-2xl mx-auto p-4 px-6">
           {tab === 'dashboard' && (
             <Dashboard
               products={products}
