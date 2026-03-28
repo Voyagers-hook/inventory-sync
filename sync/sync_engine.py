@@ -32,17 +32,30 @@ class SyncEngine:
                 ss_stock_map[vid] = inv_item.get("quantity", 0)
 
         for prod in ss_products:
-            for variant in prod.get("variants", []):
+            prod_name = prod.get("name", "Unnamed")
+            variants = prod.get("variants", [])
+            for variant in variants:
                 sku = variant.get("sku") or f"SS-{prod['id']}-{variant['id']}"
+                # Build variant-aware name (append attributes for multi-variant products)
+                attrs = variant.get("attributes", {})
+                if len(variants) > 1 and attrs:
+                    label = " / ".join(str(v) for v in attrs.values() if v)
+                    name = f"{prod_name} - {label}" if label else prod_name
+                else:
+                    name = prod_name
                 existing = self.db.get_product_by_sku(sku)
                 if not existing:
                     rows = self.db.upsert_product({
-                        "name": prod.get("name", "Unnamed"),
+                        "name": name,
                         "sku": sku,
                         "description": prod.get("description", ""),
                     })
                     existing = rows[0] if rows else self.db.get_product_by_sku(sku)
                     synced += 1
+                elif existing.get("name") == prod_name and name != prod_name:
+                    # Update existing product to include variant label
+                    self.db.update_product_name(existing["id"], name)
+                    logger.info(f"Updated variant name: '{prod_name}' → '{name}'")
                 if existing:
                     product_id = existing["id"]
                     stock_qty = ss_stock_map.get(variant["id"], 0)
