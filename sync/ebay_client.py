@@ -138,25 +138,59 @@ class EbayClient:
                 item_id = g('ItemID')
                 title = g('Title')
                 price_el = item.find(f'{{{NS}}}BuyItNowPrice')
-                price = float(price_el.text) if price_el is not None else 0.0
-                qty_str = g('QuantityAvailable') or g('Quantity')
-                qty = int(qty_str) if qty_str else 0
+                parent_price = float(price_el.text) if price_el is not None else 0.0
                 img_el = item.find(f'{{{NS}}}PictureDetails/{{{NS}}}GalleryURL')
                 img = img_el.text if img_el is not None else None
 
-                # Use "EBAY-{itemId}" as the canonical SKU for traditional listings
-                sku = f"EBAY-{item_id}"
+                # Check for variation listings
+                variations = item.findall(f'{{{NS}}}Variations/{{{NS}}}Variation')
+                if variations:
+                    for var in variations:
+                        var_sku_el = var.find(f'{{{NS}}}SKU')
+                        var_sku = var_sku_el.text if var_sku_el is not None else None
+                        var_qty_el = var.find(f'{{{NS}}}Quantity')
+                        var_qty = int(var_qty_el.text) if var_qty_el is not None and var_qty_el.text else 0
+                        var_price_el = var.find(f'{{{NS}}}StartPrice')
+                        var_price = float(var_price_el.text) if var_price_el is not None else parent_price
 
-                all_items.append({
-                    "sku": sku,
-                    "item_id": item_id,
-                    "product": {"title": title},
-                    "availability": {
-                        "shipToLocationAvailability": {"quantity": qty}
-                    },
-                    "price": price,
-                    "image_url": img,
-                })
+                        # Build variant label from specifics (e.g. "7m" or "Large / Red")
+                        attrs = []
+                        for nvl in var.findall(f'{{{NS}}}VariationSpecifics/{{{NS}}}NameValueList'):
+                            val_el = nvl.find(f'{{{NS}}}Value')
+                            if val_el is not None and val_el.text:
+                                attrs.append(val_el.text)
+                        attr_str = ' / '.join(attrs) if attrs else (var_sku or 'Variant')
+
+                        safe_var_sku = (var_sku or attr_str).replace(' ', '_').replace('/', '-')[:40]
+                        sku = f"EBAY-{item_id}-{safe_var_sku}"
+
+                        all_items.append({
+                            "sku": sku,
+                            "item_id": item_id,
+                            "variation_sku": var_sku,
+                            "product": {"title": f"{title} - {attr_str}"},
+                            "availability": {
+                                "shipToLocationAvailability": {"quantity": var_qty}
+                            },
+                            "price": var_price,
+                            "image_url": img,
+                        })
+                else:
+                    # Regular single listing
+                    qty_str = g('QuantityAvailable') or g('Quantity')
+                    qty = int(qty_str) if qty_str else 0
+                    sku = f"EBAY-{item_id}"
+                    all_items.append({
+                        "sku": sku,
+                        "item_id": item_id,
+                        "variation_sku": None,
+                        "product": {"title": title},
+                        "availability": {
+                            "shipToLocationAvailability": {"quantity": qty}
+                        },
+                        "price": parent_price,
+                        "image_url": img,
+                    })
 
             logger.info(f"eBay listings page {page}/{total_pages}: {len(items)} items")
             page += 1
@@ -168,12 +202,14 @@ class EbayClient:
         """Not used with Trading API flow — kept for compatibility."""
         return None
 
-    def update_inventory_quantity(self, item_id: str, quantity: int):
+    def update_inventory_quantity(self, item_id: str, quantity: int, variation_sku: str = None):
         """Update stock quantity for a traditional eBay listing via ReviseInventoryStatus."""
+        sku_tag = f"<SKU>{variation_sku}</SKU>" if variation_sku else ""
         xml = f'''<?xml version="1.0" encoding="utf-8"?>
 <ReviseInventoryStatusRequest xmlns="urn:ebay:apis:eBLBaseComponents">
   <InventoryStatus>
     <ItemID>{item_id}</ItemID>
+    {sku_tag}
     <Quantity>{max(0, quantity)}</Quantity>
   </InventoryStatus>
 </ReviseInventoryStatusRequest>'''
