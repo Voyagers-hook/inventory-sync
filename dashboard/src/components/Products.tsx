@@ -499,31 +499,31 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
                             ? <Link size={11} className="text-success flex-shrink-0" />
                             : <Unlink size={11} className="text-base-content/20 flex-shrink-0" />
                           }
-                          <span className="text-sm font-medium text-base-content truncate max-w-[150px] sm:max-w-[200px]">{p.name}</span>
+                          <span className="text-sm font-medium text-base-content">{p.name}</span>
                         </div>
                       </td>
-                      <td className="hidden sm:table-cell">
+                      <td className="hidden sm:table-cell whitespace-nowrap">
                         <span className="font-mono text-xs text-base-content/50">{p.sku}</span>
                       </td>
-                      <td className="text-center">
+                      <td className="text-center whitespace-nowrap">
                         <div className="flex justify-center gap-1">
                           {ssPr && <span className="inline-flex px-1.5 py-0.5 rounded text-xs font-medium bg-indigo-50 text-indigo-600">SS</span>}
                           {ebPr && <span className="inline-flex px-1.5 py-0.5 rounded text-xs font-medium bg-yellow-50 text-yellow-600">EB</span>}
                           {!ssPr && !ebPr && <span className="text-xs text-base-content/20">—</span>}
                         </div>
                       </td>
-                      <td className="text-right">
+                      <td className="text-right whitespace-nowrap">
                         <span className={`text-sm font-semibold ${lowStock ? 'text-orange-500' : 'text-base-content'}`}>
                           {inv?.total_stock ?? 0}
                           {lowStock && <AlertTriangle size={10} className="inline ml-1 text-orange-400" />}
                         </span>
                       </td>
-                      <td className="text-right hidden md:table-cell">
+                      <td className="text-right hidden md:table-cell whitespace-nowrap">
                         <span className="text-sm text-base-content/70">
                           {ssPr ? `£${Number(ssPr.price).toFixed(2)}` : <span className="text-base-content/20">—</span>}
                         </span>
                       </td>
-                      <td className="text-right hidden md:table-cell">
+                      <td className="text-right hidden md:table-cell whitespace-nowrap">
                         <span className="text-sm text-base-content/70">
                           {ebPr ? `£${Number(ebPr.price).toFixed(2)}` : <span className="text-base-content/20">—</span>}
                         </span>
