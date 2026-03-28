@@ -100,6 +100,16 @@ class Database:
         rows = self._rest("GET", "products", params={"sku": f"eq.{sku}", "select": "*"})
         return rows[0] if rows else None
 
+    def update_product_name(self, product_id: str, name: str):
+        r = requests.patch(
+            f"{self.url}/rest/v1/products",
+            headers=self.headers,
+            params={"id": f"eq.{product_id}"},
+            json={"name": name, "updated_at": datetime.now(timezone.utc).isoformat()},
+            timeout=30,
+        )
+        r.raise_for_status()
+
     # ─── Platform Pricing Lookups ────────────────────────────────────────────
 
     def get_platform_pricing_for_product(self, product_id: str, platform: str = None):
