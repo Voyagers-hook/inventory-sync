@@ -261,6 +261,8 @@ class EbayClient:
                 f"{BASE_URL}/sell/fulfillment/v1/order",
                 headers=self._rest_headers(), params=params, timeout=30,
             )
+            if not r.ok:
+                print(f'eBay token error response: {r.text}')
             r.raise_for_status()
             data = r.json()
             orders.extend(data.get("orders", []))
