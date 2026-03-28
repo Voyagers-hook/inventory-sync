@@ -440,14 +440,7 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
         <button className="btn btn-primary btn-sm gap-1.5" onClick={() => setShowAdd(true)}>
           <Plus size={14} /> Add
         </button>
-        {checkedIds.size === 2 && (
-          <button className="btn btn-secondary btn-sm gap-1.5 animate-pulse" onClick={() => setShowMerge(true)}>
-            <GitMerge size={14} /> Merge 2 selected
-          </button>
-        )}
-        {checkedIds.size === 1 && (
-          <span className="text-xs text-base-content/40 px-2">Tick one more to merge</span>
-        )}
+
       </div>
 
       <p className="text-xs text-base-content/40">
@@ -593,6 +586,42 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
           onClose={() => setShowMerge(false)}
           onMerge={handleMerge}
         />
+      )}
+
+      {/* Floating merge bar — appears whenever items are checked */}
+      {checkedIds.size > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 bg-white border border-base-300 shadow-2xl rounded-2xl px-5 py-3 transition-all">
+          <div className="flex items-center gap-2 text-sm font-medium text-base-content/70">
+            <div className="flex gap-1">
+              {checkedProducts.map(p => (
+                <span key={p.id} className="inline-flex items-center gap-1 bg-primary/10 text-primary text-xs font-semibold rounded-lg px-2 py-1">
+                  {p.name.length > 22 ? p.name.slice(0, 22) + '…' : p.name}
+                  <button onClick={(e) => { e.stopPropagation(); toggleCheck(p.id, e as any); }} className="ml-0.5 hover:text-error transition-colors">
+                    <X size={11} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+          {checkedIds.size === 1 && (
+            <span className="text-xs text-base-content/40 border-l border-base-300 pl-3">Tick one more to merge</span>
+          )}
+          {checkedIds.size === 2 && (
+            <button
+              className="btn btn-primary btn-sm gap-1.5 border-l border-base-300 pl-3 rounded-l-none -mr-2 pr-4"
+              onClick={() => setShowMerge(true)}
+            >
+              <GitMerge size={14} /> Merge into one
+            </button>
+          )}
+          <button
+            className="btn btn-ghost btn-xs text-base-content/40 hover:text-error"
+            onClick={() => setCheckedIds(new Set())}
+            title="Clear selection"
+          >
+            <X size={14} />
+          </button>
+        </div>
       )}
     </div>
   );
