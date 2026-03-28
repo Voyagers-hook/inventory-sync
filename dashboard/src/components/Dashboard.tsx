@@ -87,18 +87,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const orderCount = filteredOrders.length;
     const lowStockThreshold = parseInt(settings.find(s => s.key === 'default_low_stock_threshold')?.value || '5');
     const lowStock = inventory.filter(i => i.total_stock <= (i.low_stock_threshold || lowStockThreshold)).length;
-    const unfulfilled = orders.filter(o => {
-      const st = (o.fulfillment_status || 'PENDING').toUpperCase();
-      if (st === 'CANCELLED' || st === 'CANCELED') return false;
-      return st === 'PENDING' || st === 'NOT_STARTED';
-    });
     const sqRevenue = filteredOrders
       .filter(o => o.platform?.toLowerCase().includes('squarespace'))
       .reduce((s, o) => s + Number(o.order_total || o.unit_price || 0), 0);
     const ebRevenue = filteredOrders
       .filter(o => o.platform?.toLowerCase().includes('ebay'))
       .reduce((s, o) => s + Number(o.order_total || o.unit_price || 0), 0);
-    return { revenue, orderCount, lowStock, unfulfilled, sqRevenue, ebRevenue };
+    return { revenue, orderCount, lowStock, sqRevenue, ebRevenue };
   }, [filteredOrders, orders, inventory, settings]);
 
   const lastSync = syncLogs[0] || null;
@@ -186,21 +181,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <p className="text-xs text-base-content/40 mt-1.5">in selected period</p>
         </div>
 
-        {/* Unfulfilled — clickable */}
-        <div
-          className="bg-base-100 rounded-xl border border-orange-200 p-4 shadow-sm cursor-pointer hover:border-orange-300 hover:bg-orange-50/30 transition-all"
-          onClick={() => onNavigate('orders')}
-        >
-          <div className="flex items-start justify-between mb-2">
-            <p className="text-xs font-semibold text-orange-500/80 uppercase tracking-wide">Unfulfilled</p>
-            <div className="p-1.5 bg-orange-50 rounded-lg"><ShoppingCart size={13} className="text-orange-500" /></div>
-          </div>
-          <p className="text-2xl font-bold text-orange-500">{stats.unfulfilled.length}</p>
-          <p className="text-xs text-orange-400 mt-1.5 flex items-center gap-1">
-            Click to view <ChevronRight size={10} />
-          </p>
-        </div>
-
         {/* Low Stock */}
         <div
           className="bg-base-100 rounded-xl border border-base-300 p-4 shadow-sm cursor-pointer hover:border-red-300 hover:shadow-md transition-all group"
@@ -216,51 +196,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </p>
         </div>
       </div>
-
-      {/* Unfulfilled Orders List */}
-      {stats.unfulfilled.length > 0 && (
-        <div className="bg-base-100 rounded-xl border border-base-300 shadow-sm overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-base-300 bg-base-200/50">
-            <h3 className="font-semibold text-sm text-base-content">Unfulfilled Orders</h3>
-            <button
-              className="text-xs text-primary font-medium hover:underline flex items-center gap-0.5"
-              onClick={() => onNavigate('orders')}
-            >
-              View all <ChevronRight size={11} />
-            </button>
-          </div>
-          <div className="divide-y divide-base-200">
-            {stats.unfulfilled.slice(0, 6).map(o => (
-              <div
-                key={o.id}
-                className="flex items-center justify-between px-4 py-3 hover:bg-base-200/60 cursor-pointer transition-colors"
-                onClick={() => onNavigate('orders')}
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <PlatformBadge platform={o.platform} />
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-base-content truncate">{o.customer_name || 'Customer'}</p>
-                    <p className="text-xs text-base-content/40 truncate">{o.item_name || o.order_number || '—'}</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-3 flex-shrink-0 ml-2">
-                  <span className="text-sm font-semibold text-base-content">£{Number(o.order_total || o.unit_price || 0).toFixed(2)}</span>
-                  <span className="text-xs text-base-content/30 hidden sm:inline">{formatDateShort(o.ordered_at)}</span>
-                  <ChevronRight size={14} className="text-base-content/20" />
-                </div>
-              </div>
-            ))}
-            {stats.unfulfilled.length > 6 && (
-              <div
-                className="text-center py-3 text-xs text-primary font-medium hover:underline cursor-pointer bg-base-200/30"
-                onClick={() => onNavigate('orders')}
-              >
-                + {stats.unfulfilled.length - 6} more unfulfilled orders
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Sync Status */}
       <div className="bg-base-100 rounded-xl border border-base-300 p-4 shadow-sm">
