@@ -101,6 +101,7 @@ class SyncEngine:
                     "price": float(price_val),
                     "currency": "GBP",
                     "platform_product_id": ebay_item_id,
+                    "platform_variant_id": item.get("variation_sku"),
                 })
 
         logger.info(f"eBay catalogue: {ebay_synced} new products, {len(ebay_items)} total")
@@ -323,7 +324,7 @@ class SyncEngine:
             for ep in self.db.get_platform_pricing_for_product(product_id, "ebay"):
                 ebay_item_id = ep.get("platform_product_id")
                 if ebay_item_id:
-                    ebay_updates.append({"item_id": ebay_item_id, "new_qty": new_stock})
+                    ebay_updates.append({"item_id": ebay_item_id, "variation_sku": ep.get("platform_variant_id"), "new_qty": new_stock})
 
             for sp in self.db.get_platform_pricing_for_product(product_id, "squarespace"):
                 variant_id = sp.get("platform_variant_id")
@@ -335,7 +336,7 @@ class SyncEngine:
         # ── Push to eBay ─────────────────────────────────────────────────────
         for upd in ebay_updates:
             try:
-                self.ebay.update_inventory_quantity(upd["item_id"], upd["new_qty"])
+                self.ebay.update_inventory_quantity(upd["item_id"], upd["new_qty"], upd.get("variation_sku"))
                 pushed += 1
                 logger.info(f"Stock → eBay item {upd['item_id']}: {upd['new_qty']}")
             except Exception as e:
