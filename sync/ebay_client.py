@@ -52,6 +52,8 @@ class EbayClient:
             "scope": SCOPES,
         }
         r = requests.post(TOKEN_URL, headers=headers, data=data, timeout=30)
+        if not r.ok:
+            logger.error(f"eBay token exchange failed {r.status_code}: {r.text}")
         r.raise_for_status()
         resp = r.json()
         self._access_token = resp["access_token"]
@@ -261,8 +263,6 @@ class EbayClient:
                 f"{BASE_URL}/sell/fulfillment/v1/order",
                 headers=self._rest_headers(), params=params, timeout=30,
             )
-            if not r.ok:
-                print(f'eBay token error response: {r.text}')
             r.raise_for_status()
             data = r.json()
             orders.extend(data.get("orders", []))
