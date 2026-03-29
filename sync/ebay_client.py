@@ -1,7 +1,7 @@
 """
 eBay API client.
 Uses:
-  - Trading API (XML) for listing inventory (GetMyeBaySelling)
+  - Trading API (XML) for listing inventory (GetMyeBaySelling + GetItem for variations)
   - Sell Fulfillment API (REST) for orders and tracking
 Handles OAuth2 token refresh automatically.
 """
@@ -105,8 +105,20 @@ class EbayClient:
 
     # ─── Inventory (Trading API) ─────────────────────────────────────────────
 
+    def _get_item_details(self, item_id):
+        """Call GetItem to get full details including variations for a listing."""
+        xml = f'''<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <ItemID>{item_id}</ItemID>
+  <DetailLevel>ReturnAll</DetailLevel>
+  <IncludeItemSpecifics>true</IncludeItemSpecifics>
+</GetItemRequest>'''
+        root = self._trading_call("GetItem", xml)
+        return root.find(f'{{{NS}}}Item')
+
     def get_inventory_items(self):
-        """Return all active eBay listings via Trading API (GetMyeBaySelling).
+        """Return all active eBay listings via Trading API.
+        For variation listings, returns one row per variant.
         Returns list of dicts with: sku, item_id, title, price, qty, image_url
         """
         all_items = []
@@ -123,10 +135,17 @@ class EbayClient:
       <PageNumber>{page}</PageNumber>
     </Pagination>
   </ActiveList>
+  <OutputSelector>ActiveList.ItemArray.Item.ItemID</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.Title</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.QuantityAvailable</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.BuyItNowPrice</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.PictureDetails</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.ListingType</OutputSelector>
+  <OutputSelector>ActiveList.ItemArray.Item.Variations</OutputSelector>
+  <OutputSelector>ActiveList.PaginationResult</OutputSelector>
 </GetMyeBaySellingRequest>'''
             root = self._trading_call("GetMyeBaySelling", xml)
 
-            # Get total pages from response
             tp_el = root.find(f'.//{{{NS}}}TotalNumberOfPages')
             if tp_el is not None and tp_el.text:
                 total_pages = int(tp_el.text)
@@ -144,8 +163,28 @@ class EbayClient:
                 img_el = item.find(f'{{{NS}}}PictureDetails/{{{NS}}}GalleryURL')
                 img = img_el.text if img_el is not None else None
 
-                # Check for variation listings
+                # Check for variations in response
                 variations = item.findall(f'{{{NS}}}Variations/{{{NS}}}Variation')
+
+                # If no variations in summary response, check if it's a variation listing
+                # by calling GetItem for full details
+                if not variations:
+                    # Check if listing type hints at variations (or just call GetItem)
+                    # We call GetItem to be sure - this catches all variation listings
+                    try:
+                        full_item = self._get_item_details(item_id)
+                        if full_item is not None:
+                            variations = full_item.findall(f'{{{NS}}}Variations/{{{NS}}}Variation')
+                            # Also update price/img from full item if needed
+                            fi_price_el = full_item.find(f'{{{NS}}}BuyItNowPrice') or full_item.find(f'{{{NS}}}StartPrice')
+                            if fi_price_el is not None and not parent_price:
+                                parent_price = float(fi_price_el.text)
+                            fi_img_el = full_item.find(f'{{{NS}}}PictureDetails/{{{NS}}}GalleryURL')
+                            if fi_img_el is not None and not img:
+                                img = fi_img_el.text
+                    except Exception as e:
+                        logger.warning(f"GetItem failed for {item_id}: {e}")
+
                 if variations:
                     for var in variations:
                         var_sku_el = var.find(f'{{{NS}}}SKU')
@@ -251,9 +290,7 @@ class EbayClient:
     # ─── Orders ─────────────────────────────────────────────────────────────────
 
     def get_orders(self, created_after: str = None):
-        """Return orders from Sell Fulfillment API.
-        created_after: ISO8601 string e.g. '2024-01-15T10:00:00.000Z'
-        """
+        """Return orders from Sell Fulfillment API."""
         orders, offset, limit = [], 0, 50
         while True:
             params = {"limit": limit, "offset": offset}
