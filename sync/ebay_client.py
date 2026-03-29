@@ -42,7 +42,9 @@ class EbayClient:
         eBay rotates refresh tokens, so we always save the new one."""
         refresh_token = self.db.get_setting("ebay_refresh_token")
         if not refresh_token:
-            raise ValueError("No eBay refresh token in database")
+            refresh_token = os.environ.get("EBAY_REFRESH_TOKEN", "").strip()
+        if not refresh_token:
+            raise ValueError("No eBay refresh token in database or environment")
         refresh_token = refresh_token.strip()
 
         creds = base64.b64encode(
@@ -138,6 +140,32 @@ class EbayClient:
     # ------------------------------------------------------------------
     # Listing retrieval
     # ------------------------------------------------------------------
+
+    def _get_inventory_api_items(self):
+        """
+        Try eBay Sell Inventory API to get ALL inventory items including zero-stock.
+        Only works for managed listings. Returns [] gracefully if not available.
+        """
+        items = []
+        offset = 0
+        limit = 200
+        try:
+            while True:
+                url = f"https://api.ebay.com/sell/inventory/v1/inventory_item?limit={limit}&offset={offset}"
+                resp = self._get(url)
+                page = resp.get("inventoryItems", [])
+                if not page:
+                    break
+                items.extend(page)
+                total = int(resp.get("total", 0))
+                offset += limit
+                if offset >= total:
+                    break
+            logger.info("Inventory API returned %d items", len(items))
+        except Exception as e:
+            logger.info("Inventory API not available (traditional listings): %s", e)
+            return []
+        return items
 
     def _get_all_summary_items(self):
         """Paginate through all seller listing summaries."""
@@ -243,6 +271,7 @@ class EbayClient:
     def get_inventory_items(self):
         """
         Return all active eBay listings, one entry per variant (or single item).
+        Merges Browse API (in-stock) with Inventory API (zero-stock managed listings).
         Each entry: {sku, title, price, quantity, item_id, legacy_item_id, group_id, aspects, is_variant}
         """
         raw_items = self._get_all_summary_items()
@@ -267,7 +296,34 @@ class EbayClient:
                 except Exception as e:
                     logger.warning("Item expansion error: %s", e)
 
-        logger.info("Expanded to %d total variant/item entries", len(results))
+        logger.info("Expanded to %d total variant/item entries from Browse API", len(results))
+
+        # Supplement with Inventory API to catch zero-stock managed listings
+        inv_items = self._get_inventory_api_items()
+        if inv_items:
+            browse_skus = {r["sku"] for r in results}
+            for inv in inv_items:
+                sku = inv.get("sku", "")
+                if not sku or sku in browse_skus:
+                    continue  # Already have this item in-stock from Browse API
+                product = inv.get("product", {})
+                offers = inv.get("offers", [])
+                price = 0.0
+                if offers:
+                    price = float(offers[0].get("pricingSummary", {}).get("price", {}).get("value", 0) or 0)
+                results.append({
+                    "sku": sku,
+                    "title": product.get("title", sku),
+                    "price": price,
+                    "quantity": 0,
+                    "item_id": sku,
+                    "legacy_item_id": "",
+                    "group_id": None,
+                    "aspects": {},
+                    "is_variant": False,
+                })
+            logger.info("After Inventory API merge: %d total entries", len(results))
+
         return results
 
     # ------------------------------------------------------------------
@@ -331,3 +387,4 @@ class EbayClient:
         logger.warning(
             "update_inventory_quantity: traditional seller account, skipping (%s)", item_id
         )
+
