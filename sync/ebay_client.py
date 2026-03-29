@@ -93,7 +93,19 @@ class EbayClient:
 
         stored = self.db.get_setting("ebay_access_token")
         expiry_str = self.db.get_setting("ebay_token_expiry")
-        expiry = int(expiry_str.strip()) if expiry_str else 0
+        expiry = 0
+        if expiry_str:
+            expiry_str = expiry_str.strip()
+            try:
+                expiry = int(expiry_str)
+            except ValueError:
+                # Stored as ISO datetime string e.g. "2026-03-29T13:09:19.636903+00:00"
+                try:
+                    from datetime import datetime, timezone
+                    dt = datetime.fromisoformat(expiry_str)
+                    expiry = int(dt.timestamp())
+                except Exception:
+                    expiry = 0
 
         if stored and now < expiry:
             self._access_token = stored.strip()
