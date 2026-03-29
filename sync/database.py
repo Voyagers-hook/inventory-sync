@@ -124,14 +124,12 @@ class Database:
 
     def get_all_ebay_products(self):
         """Return all eBay products via platform_pricing table."""
-        rows = self._rest("GET", "platform_pricing", params={"platform": "eq.ebay", "select": "product_id,sku"})
+        rows = self._rest("GET", "platform_pricing", params={"platform": "eq.ebay", "select": "product_id"})
         if not isinstance(rows, list):
             return []
-        # Get full product details for each
         product_ids = [r["product_id"] for r in rows]
         if not product_ids:
             return []
-        # Fetch products whose IDs are in the list
         id_filter = "in.(" + ",".join(product_ids) + ")"
         products = self._rest("GET", "products", params={"id": id_filter, "select": "id,sku,name", "limit": "2000"})
         return products if isinstance(products, list) else []
