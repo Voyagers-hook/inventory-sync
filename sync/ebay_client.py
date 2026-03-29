@@ -77,7 +77,7 @@ class EbayClient:
             r.raise_for_status()
         resp = r.json()
 
-        self._access_token = resp["access_token"]
+        self._access_token = resp["access_token"].strip()
         expires_in = int(resp.get("expires_in", 7200))
         self._token_expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 120)
         logger.info("eBay access token refreshed, valid for ~2h")
@@ -104,7 +104,7 @@ class EbayClient:
             if tok and exp_s:
                 expiry = datetime.fromisoformat(exp_s)
                 if expiry > datetime.now(timezone.utc):
-                    self._access_token = tok
+                    self._access_token = tok.strip()
                     self._token_expiry = expiry
         if not self._access_token or (self._token_expiry and datetime.now(timezone.utc) >= self._token_expiry):
             self._fetch_new_access_token()
