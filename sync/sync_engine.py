@@ -140,6 +140,22 @@ class SyncEngine:
                 self.db.delete_product(old_product["id"])
 
         logger.info(f"eBay catalogue: {ebay_synced} new products, {len(ebay_items)} total")
+        # Zero-stock reconciliation: items in DB but not returned by Browse API = out of stock
+        # Browse API only returns buyable (in-stock) items, so DB items missing from results = 0 stock
+        synced_skus = {item.get("sku") for item in ebay_items if item.get("sku")}
+        db_ebay_products = self.db.get_all_ebay_products()
+        zero_stock_count = 0
+        for db_prod in db_ebay_products:
+            db_sku = db_prod.get("sku", "")
+            if db_sku and db_sku not in synced_skus:
+                inv_rows = self.db.get_inventory(db_prod["id"])
+                if inv_rows and inv_rows[0].get("total_stock", 0) != 0:
+                    self.db.upsert_inventory({"product_id": db_prod["id"], "total_stock": 0})
+                    zero_stock_count += 1
+                    logger.info(f"Zero-stock: {db_sku} not in Browse API — set to 0")
+        if zero_stock_count:
+            logger.info(f"Marked {zero_stock_count} eBay product(s) as zero stock")
+
         logger.info(f"Catalogue sync complete: {synced + ebay_synced} new products added")
         return synced + ebay_synced
 
