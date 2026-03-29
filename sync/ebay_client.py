@@ -1,9 +1,16 @@
 """
 eBay API client.
 Uses:
-  - Trading API (XML) for listing inventory (GetMyeBaySelling + GetItem for variations)
-  - Sell Fulfillment API (REST) for orders and tracking
-Handles OAuth2 token refresh automatically.
+ - Trading API (XML) for listing inventory (GetMyeBaySelling + GetItem for variations)
+ - Sell Fulfillment API (REST) for orders and tracking
+Handles OAuth2 token refresh automatically, including rotating refresh tokens.
+
+FIX (2025): eBay rotates refresh tokens on each use. The old code discarded
+the new refresh token returned by eBay, causing every sync after the first
+to fail with 400. Now we:
+  1. On init: prefer the refresh token stored in Supabase over the env var
+     (the Supabase copy is always the latest rotated token).
+  2. After each token refresh: save the new refresh token back to Supabase.
 """
 import os
 import base64
@@ -14,7 +21,7 @@ from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
-BASE_URL  = "https://api.ebay.com"
+BASE_URL = "https://api.ebay.com"
 TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 TRADING_URL = "https://api.ebay.com/ws/api.dll"
 NS = "urn:ebay:apis:eBLBaseComponents"
@@ -24,16 +31,29 @@ SCOPES = (
     "https://api.ebay.com/oauth/api_scope/sell.fulfillment"
 )
 
-
 class EbayClient:
     def __init__(self, db=None):
-        self.app_id      = os.environ["EBAY_APP_ID"]
-        self.cert_id     = os.environ["EBAY_CERT_ID"]
-        self.dev_id      = os.environ.get("EBAY_DEV_ID", "cd505b42-9374-4d5c-86a5-1e31f075a2f1")
-        self.refresh_tok = os.environ["EBAY_REFRESH_TOKEN"]
+        self.app_id = os.environ["EBAY_APP_ID"]
+        self.cert_id = os.environ["EBAY_CERT_ID"]
+        self.dev_id = os.environ.get("EBAY_DEV_ID", "cd505b42-9374-4d5c-86a5-1e31f075a2f1")
         self.db = db
         self._access_token = None
         self._token_expiry = None
+
+        # ── ROTATING REFRESH TOKEN FIX ────────────────────────────────────────
+        # Prefer the refresh token stored in Supabase (always the latest rotated
+        # copy) over the static env var. The env var only needs to be valid once
+        # ever — after the first successful refresh, Supabase takes over.
+        if db:
+            stored_refresh = db.get_setting("ebay_refresh_token")
+            if stored_refresh:
+                self.refresh_tok = stored_refresh
+                logger.info("Loaded eBay refresh token from Supabase (latest rotated copy)")
+            else:
+                self.refresh_tok = os.environ["EBAY_REFRESH_TOKEN"]
+                logger.info("Loaded eBay refresh token from environment variable")
+        else:
+            self.refresh_tok = os.environ["EBAY_REFRESH_TOKEN"]
 
     # ─── OAuth ──────────────────────────────────────────────────────────────────
 
@@ -54,19 +74,32 @@ class EbayClient:
         r = requests.post(TOKEN_URL, headers=headers, data=data, timeout=30)
         if not r.ok:
             logger.error(f"eBay token exchange failed {r.status_code}: {r.text}")
-        r.raise_for_status()
+            r.raise_for_status()
         resp = r.json()
+
         self._access_token = resp["access_token"]
         expires_in = int(resp.get("expires_in", 7200))
         self._token_expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 120)
         logger.info("eBay access token refreshed, valid for ~2h")
+
         if self.db:
             self.db.set_setting("ebay_access_token", self._access_token)
             self.db.set_setting("ebay_token_expiry", self._token_expiry.isoformat())
 
+            # ── ROTATING REFRESH TOKEN FIX ────────────────────────────────────
+            # eBay rotates refresh tokens: each use returns a NEW refresh token.
+            # Save it to Supabase so the next run uses the fresh one.
+            new_refresh = resp.get("refresh_token")
+            if new_refresh and new_refresh != self.refresh_tok:
+                self.refresh_tok = new_refresh
+                self.db.set_setting("ebay_refresh_token", new_refresh)
+                logger.info("eBay refresh token rotated — new token saved to Supabase")
+            elif new_refresh:
+                logger.info("eBay refresh token unchanged this cycle")
+
     def _get_access_token(self):
         if self.db and not self._access_token:
-            tok   = self.db.get_setting("ebay_access_token")
+            tok = self.db.get_setting("ebay_access_token")
             exp_s = self.db.get_setting("ebay_token_expiry")
             if tok and exp_s:
                 expiry = datetime.fromisoformat(exp_s)
@@ -98,8 +131,8 @@ class EbayClient:
 
     def _trading_call(self, call_name, xml_body):
         r = requests.post(TRADING_URL,
-            headers=self._trading_headers(call_name),
-            data=xml_body, timeout=60)
+                          headers=self._trading_headers(call_name),
+                          data=xml_body, timeout=60)
         r.raise_for_status()
         return ET.fromstring(r.text)
 
@@ -107,12 +140,14 @@ class EbayClient:
 
     def _get_item_details(self, item_id):
         """Call GetItem to get full details including variations for a listing."""
-        xml = f'''<?xml version="1.0" encoding="utf-8"?>
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken></eBayAuthToken></RequesterCredentials>
   <ItemID>{item_id}</ItemID>
   <DetailLevel>ReturnAll</DetailLevel>
   <IncludeItemSpecifics>true</IncludeItemSpecifics>
-</GetItemRequest>'''
+  <IncludeVariations>true</IncludeVariations>
+</GetItemRequest>"""
         root = self._trading_call("GetItem", xml)
         return root.find(f'{{{NS}}}Item')
 
@@ -126,14 +161,12 @@ class EbayClient:
         total_pages = 1
 
         while page <= total_pages:
-            xml = f'''<?xml version="1.0" encoding="utf-8"?>
+            xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken></eBayAuthToken></RequesterCredentials>
   <ActiveList>
     <Include>true</Include>
-    <Pagination>
-      <EntriesPerPage>200</EntriesPerPage>
-      <PageNumber>{page}</PageNumber>
-    </Pagination>
+    <Pagination><EntriesPerPage>200</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
   </ActiveList>
   <OutputSelector>ActiveList.ItemArray.Item.ItemID</OutputSelector>
   <OutputSelector>ActiveList.ItemArray.Item.Title</OutputSelector>
@@ -143,7 +176,7 @@ class EbayClient:
   <OutputSelector>ActiveList.ItemArray.Item.ListingType</OutputSelector>
   <OutputSelector>ActiveList.ItemArray.Item.Variations</OutputSelector>
   <OutputSelector>ActiveList.PaginationResult</OutputSelector>
-</GetMyeBaySellingRequest>'''
+</GetMyeBaySellingRequest>"""
             root = self._trading_call("GetMyeBaySelling", xml)
 
             tp_el = root.find(f'.//{{{NS}}}TotalNumberOfPages')
@@ -166,16 +199,13 @@ class EbayClient:
                 # Check for variations in response
                 variations = item.findall(f'{{{NS}}}Variations/{{{NS}}}Variation')
 
-                # If no variations in summary response, check if it's a variation listing
-                # by calling GetItem for full details
+                # GetMyeBaySelling rarely returns variation details even when requested.
+                # Always call GetItem to get full variation data for every listing.
                 if not variations:
-                    # Check if listing type hints at variations (or just call GetItem)
-                    # We call GetItem to be sure - this catches all variation listings
                     try:
                         full_item = self._get_item_details(item_id)
                         if full_item is not None:
                             variations = full_item.findall(f'{{{NS}}}Variations/{{{NS}}}Variation')
-                            # Also update price/img from full item if needed
                             fi_price_el = full_item.find(f'{{{NS}}}BuyItNowPrice') or full_item.find(f'{{{NS}}}StartPrice')
                             if fi_price_el is not None and not parent_price:
                                 parent_price = float(fi_price_el.text)
@@ -246,14 +276,15 @@ class EbayClient:
     def update_inventory_quantity(self, item_id: str, quantity: int, variation_sku: str = None):
         """Update stock quantity for a traditional eBay listing via ReviseInventoryStatus."""
         sku_tag = f"<SKU>{variation_sku}</SKU>" if variation_sku else ""
-        xml = f'''<?xml version="1.0" encoding="utf-8"?>
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <ReviseInventoryStatusRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken></eBayAuthToken></RequesterCredentials>
   <InventoryStatus>
     <ItemID>{item_id}</ItemID>
     {sku_tag}
     <Quantity>{max(0, quantity)}</Quantity>
   </InventoryStatus>
-</ReviseInventoryStatusRequest>'''
+</ReviseInventoryStatusRequest>"""
         root = self._trading_call("ReviseInventoryStatus", xml)
         ack = root.find(f'{{{NS}}}Ack')
         if ack is not None and ack.text in ('Success', 'Warning'):
@@ -271,13 +302,14 @@ class EbayClient:
 
     def update_offer_price(self, item_id: str, price: float):
         """Update the BIN price on a traditional eBay listing via ReviseItem."""
-        xml = f'''<?xml version="1.0" encoding="utf-8"?>
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken></eBayAuthToken></RequesterCredentials>
   <Item>
     <ItemID>{item_id}</ItemID>
     <StartPrice>{price:.2f}</StartPrice>
   </Item>
-</ReviseItemRequest>'''
+</ReviseItemRequest>"""
         root = self._trading_call("ReviseItem", xml)
         ack = root.find(f'{{{NS}}}Ack')
         if ack is not None and ack.text in ('Success', 'Warning'):
