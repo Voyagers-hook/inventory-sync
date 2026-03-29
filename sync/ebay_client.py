@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 logger = logging.getLogger(__name__)
 
 SELLER = "voyagershookfishingco"
-MARKETPLACE = "EBAY_GB"
+MARKETPLACE = "EBAY-GB"
 
 SCOPES = (
     "https://api.ebay.com/oauth/api_scope "
@@ -148,7 +148,7 @@ class EbayClient:
         while True:
             url = (
                 f"https://api.ebay.com/buy/browse/v1/item_summary/search"
-                f"?q=*&filter=sellers%3A%7B{SELLER}%7D&limit={limit}&offset={offset}"
+                f"?q=fishing&filter=sellers%3A%7B{SELLER}%7D&limit={limit}&offset={offset}"
             )
             try:
                 resp = self._get(url)
@@ -324,3 +324,4 @@ class EbayClient:
         logger.warning(
             "update_inventory_quantity: traditional seller account, skipping (%s)", item_id
         )
+
