@@ -197,10 +197,17 @@ class EbayClient:
                 return []
 
             entries = []
-            for i, v in enumerate(group_data.get("items", [])):
+            # Determine which aspects actually vary between variants
+            # (excludes brand, country, fishing type etc. that are the same on all variants)
+            _all_items = group_data.get("items", [])
+            _asp_maps = [{a["name"]: a["value"] for a in v.get("localizedAspects", [])} for v in _all_items]
+            _all_names = {n for m in _asp_maps for n in m}
+            _varying = {n for n in _all_names if len({m.get(n, "") for m in _asp_maps}) > 1}
+            for i, v in enumerate(_all_items):
                 avail = v.get("estimatedAvailabilities", [{}])[0]
                 qty = avail.get("estimatedAvailableQuantity", 0) or 0
-                aspects = {a["name"]: a["value"] for a in v.get("localizedAspects", [])}
+                _raw_asp = {a["name"]: a["value"] for a in v.get("localizedAspects", [])}
+                aspects = {k: val for k, val in _raw_asp.items() if k in _varying} if _varying else _raw_asp
                 legacy_id = v.get("legacyItemId", "")
                 sku = v.get("sku") or f"{legacy_id or group_id}-v{i}"
                 entries.append({
@@ -324,4 +331,3 @@ class EbayClient:
         logger.warning(
             "update_inventory_quantity: traditional seller account, skipping (%s)", item_id
         )
-
