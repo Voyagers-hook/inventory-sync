@@ -17,6 +17,7 @@ import base64
 import requests
 import logging
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
@@ -184,23 +185,26 @@ class EbayClient:
                 total_pages = int(tp_el.text)
 
             items = root.findall(f'.//{{{NS}}}Item')
-            for item in items:
-                def g(tag):
-                    el = item.find(f'{{{NS}}}{tag}')
-                    return el.text if el is not None else None
 
+            # Collect basic info for all items on this page
+            page_items = []
+            for item in items:
+                def g(tag, _item=item):
+                    el = _item.find(f'{{{NS}}}{tag}')
+                    return el.text if el is not None else None
                 item_id = g('ItemID')
                 title = g('Title')
                 price_el = item.find(f'{{{NS}}}BuyItNowPrice')
                 parent_price = float(price_el.text) if price_el is not None else 0.0
                 img_el = item.find(f'{{{NS}}}PictureDetails/{{{NS}}}GalleryURL')
                 img = img_el.text if img_el is not None else None
-
-                # Check for variations in response
                 variations = item.findall(f'{{{NS}}}Variations/{{{NS}}}Variation')
+                page_items.append((item_id, title, parent_price, img, variations))
 
-                # GetMyeBaySelling rarely returns variation details even when requested.
-                # Always call GetItem to get full variation data for every listing.
+            # Fetch full item details in parallel (10 workers) for all listings
+            # GetMyeBaySelling rarely returns variation data even when requested.
+            def fetch_full(entry):
+                item_id, title, parent_price, img, variations = entry
                 if not variations:
                     try:
                         full_item = self._get_item_details(item_id)
@@ -214,6 +218,13 @@ class EbayClient:
                                 img = fi_img_el.text
                     except Exception as e:
                         logger.warning(f"GetItem failed for {item_id}: {e}")
+                return (item_id, title, parent_price, img, variations)
+
+            with ThreadPoolExecutor(max_workers=10) as pool:
+                page_items = list(pool.map(fetch_full, page_items))
+
+            for item_id, title, parent_price, img, variations in page_items:
+                pass  # variables already set above, loop body continues below
 
                 if variations:
                     for var in variations:
