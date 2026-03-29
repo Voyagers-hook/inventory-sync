@@ -50,10 +50,10 @@ class EbayClient:
                 self.refresh_tok = stored_refresh.strip()
                 logger.info("Loaded eBay refresh token from Supabase (latest rotated copy)")
             else:
-                self.refresh_tok = os.environ["EBAY_REFRESH_TOKEN"]
+                self.refresh_tok = os.environ["EBAY_REFRESH_TOKEN"].strip()
                 logger.info("Loaded eBay refresh token from environment variable")
         else:
-            self.refresh_tok = os.environ["EBAY_REFRESH_TOKEN"]
+            self.refresh_tok = os.environ["EBAY_REFRESH_TOKEN"].strip()
 
     # ─── OAuth ──────────────────────────────────────────────────────────────────
 
@@ -91,7 +91,7 @@ class EbayClient:
             # Save it to Supabase so the next run uses the fresh one.
             new_refresh = resp.get("refresh_token")
             if new_refresh and new_refresh != self.refresh_tok:
-                self.refresh_tok = new_refresh
+                self.refresh_tok = new_refresh.strip() if new_refresh else new_refresh
                 self.db.set_setting("ebay_refresh_token", new_refresh)
                 logger.info("eBay refresh token rotated — new token saved to Supabase")
             elif new_refresh:
