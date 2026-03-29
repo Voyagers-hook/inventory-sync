@@ -152,8 +152,25 @@ class Database:
 
     def upsert_inventory(self, inv: dict):
         inv["updated_at"] = datetime.now(timezone.utc).isoformat()
+        product_id = inv.get("product_id")
+        if product_id:
+            # Check if inventory record already exists for this product
+            existing = self._rest("GET", "inventory", params={"product_id": f"eq.{product_id}", "select": "id"})
+            if existing:
+                # UPDATE existing record via PATCH
+                inv_id = existing[0]["id"]
+                r = requests.patch(
+                    f"{self.url}/rest/v1/inventory",
+                    headers={**self.headers, "Prefer": "return=representation"},
+                    params={"id": f"eq.{inv_id}"},
+                    json=inv,
+                    timeout=30,
+                )
+                r.raise_for_status()
+                return r.json() if r.text else []
+        # INSERT new record
         return self._rest("POST", "inventory", payload=inv,
-                          headers_extra={"Prefer": "resolution=merge-duplicates,return=representation"})
+                          headers_extra={"Prefer": "return=representation"})
 
     # ─── Platform Pricing ────────────────────────────────────────────────────
 
