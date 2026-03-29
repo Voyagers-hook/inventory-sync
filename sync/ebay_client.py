@@ -17,7 +17,6 @@ import base64
 import requests
 import logging
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
@@ -155,9 +154,13 @@ class EbayClient:
     def get_inventory_items(self):
         """Return all active eBay listings via Trading API.
         For variation listings, returns one row per variant.
+        Uses parallel GetItem calls (20 workers) to avoid timeouts.
         Returns list of dicts with: sku, item_id, title, price, qty, image_url
         """
-        all_items = []
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Step 1: collect basic info for all listings across all pages
+        raw_items = []
         page = 1
         total_pages = 1
 
@@ -175,7 +178,6 @@ class EbayClient:
   <OutputSelector>ActiveList.ItemArray.Item.BuyItNowPrice</OutputSelector>
   <OutputSelector>ActiveList.ItemArray.Item.PictureDetails</OutputSelector>
   <OutputSelector>ActiveList.ItemArray.Item.ListingType</OutputSelector>
-  <OutputSelector>ActiveList.ItemArray.Item.Variations</OutputSelector>
   <OutputSelector>ActiveList.PaginationResult</OutputSelector>
 </GetMyeBaySellingRequest>"""
             root = self._trading_call("GetMyeBaySelling", xml)
@@ -185,9 +187,6 @@ class EbayClient:
                 total_pages = int(tp_el.text)
 
             items = root.findall(f'.//{{{NS}}}Item')
-
-            # Collect basic info for all items on this page
-            page_items = []
             for item in items:
                 def g(tag, _item=item):
                     el = _item.find(f'{{{NS}}}{tag}')
@@ -198,86 +197,92 @@ class EbayClient:
                 parent_price = float(price_el.text) if price_el is not None else 0.0
                 img_el = item.find(f'{{{NS}}}PictureDetails/{{{NS}}}GalleryURL')
                 img = img_el.text if img_el is not None else None
-                variations = item.findall(f'{{{NS}}}Variations/{{{NS}}}Variation')
-                page_items.append((item_id, title, parent_price, img, variations))
+                raw_items.append((item_id, title, parent_price, img))
 
-            # Fetch full item details in parallel (10 workers) for all listings
-            # GetMyeBaySelling rarely returns variation data even when requested.
-            def fetch_full(entry):
-                item_id, title, parent_price, img, variations = entry
-                if not variations:
-                    try:
-                        full_item = self._get_item_details(item_id)
-                        if full_item is not None:
-                            variations = full_item.findall(f'{{{NS}}}Variations/{{{NS}}}Variation')
-                            fi_price_el = full_item.find(f'{{{NS}}}BuyItNowPrice') or full_item.find(f'{{{NS}}}StartPrice')
-                            if fi_price_el is not None and not parent_price:
-                                parent_price = float(fi_price_el.text)
-                            fi_img_el = full_item.find(f'{{{NS}}}PictureDetails/{{{NS}}}GalleryURL')
-                            if fi_img_el is not None and not img:
-                                img = fi_img_el.text
-                    except Exception as e:
-                        logger.warning(f"GetItem failed for {item_id}: {e}")
-                return (item_id, title, parent_price, img, variations)
+            logger.info(f"eBay listings page {page}/{total_pages}: {len(items)} items fetched")
+            page += 1
 
-            with ThreadPoolExecutor(max_workers=10) as pool:
-                page_items = list(pool.map(fetch_full, page_items))
+        logger.info(f"eBay: {len(raw_items)} listings found — fetching full details in parallel (20 workers)...")
 
-            for item_id, title, parent_price, img, variations in page_items:
-                pass  # variables already set above, loop body continues below
+        # Step 2: parallel GetItem for all listings to get variation data
+        def fetch_full(item_id):
+            try:
+                return item_id, self._get_item_details(item_id)
+            except Exception as e:
+                logger.warning(f"GetItem failed for {item_id}: {e}")
+                return item_id, None
 
-                if variations:
-                    for var in variations:
-                        var_sku_el = var.find(f'{{{NS}}}SKU')
-                        var_sku = var_sku_el.text if var_sku_el is not None else None
-                        var_qty_el = var.find(f'{{{NS}}}Quantity')
-                        var_qty = int(var_qty_el.text) if var_qty_el is not None and var_qty_el.text else 0
-                        var_price_el = var.find(f'{{{NS}}}StartPrice')
-                        var_price = float(var_price_el.text) if var_price_el is not None else parent_price
+        full_details = {}
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {executor.submit(fetch_full, iid): iid for iid, *_ in raw_items}
+            for future in as_completed(futures):
+                iid, detail = future.result()
+                full_details[iid] = detail
 
-                        # Build variant label from specifics (e.g. "7m" or "Large / Red")
-                        attrs = []
-                        for nvl in var.findall(f'{{{NS}}}VariationSpecifics/{{{NS}}}NameValueList'):
-                            val_el = nvl.find(f'{{{NS}}}Value')
-                            if val_el is not None and val_el.text:
-                                attrs.append(val_el.text)
-                        attr_str = ' / '.join(attrs) if attrs else (var_sku or 'Variant')
+        logger.info(f"eBay: parallel GetItem complete for {len(full_details)} listings")
 
-                        safe_var_sku = (var_sku or attr_str).replace(' ', '_').replace('/', '-')[:40]
-                        sku = f"EBAY-{item_id}-{safe_var_sku}"
+        # Step 3: build final item list with variants expanded
+        all_items = []
+        for item_id, title, parent_price, img in raw_items:
+            full_item = full_details.get(item_id)
+            variations = []
+            if full_item is not None:
+                variations = full_item.findall(f'{{{NS}}}Variations/{{{NS}}}Variation')
+                fi_price_el = full_item.find(f'{{{NS}}}BuyItNowPrice') or full_item.find(f'{{{NS}}}StartPrice')
+                if fi_price_el is not None and not parent_price:
+                    parent_price = float(fi_price_el.text)
+                fi_img_el = full_item.find(f'{{{NS}}}PictureDetails/{{{NS}}}GalleryURL')
+                if fi_img_el is not None and not img:
+                    img = fi_img_el.text
+                qty_el = full_item.find(f'{{{NS}}}QuantityAvailable') or full_item.find(f'{{{NS}}}Quantity')
 
-                        all_items.append({
-                            "sku": sku,
-                            "item_id": item_id,
-                            "variation_sku": var_sku,
-                            "product": {"title": f"{title} - {attr_str}"},
-                            "availability": {
-                                "shipToLocationAvailability": {"quantity": var_qty}
-                            },
-                            "price": var_price,
-                            "image_url": img,
-                        })
-                else:
-                    # Regular single listing
-                    qty_str = g('QuantityAvailable') or g('Quantity')
-                    qty = int(qty_str) if qty_str else 0
-                    sku = f"EBAY-{item_id}"
+            if variations:
+                for var in variations:
+                    var_sku_el = var.find(f'{{{NS}}}SKU')
+                    var_sku = var_sku_el.text if var_sku_el is not None else None
+                    var_qty_el = var.find(f'{{{NS}}}Quantity')
+                    var_qty = int(var_qty_el.text) if var_qty_el is not None and var_qty_el.text else 0
+                    var_price_el = var.find(f'{{{NS}}}StartPrice')
+                    var_price = float(var_price_el.text) if var_price_el is not None else parent_price
+
+                    attrs = []
+                    for nvl in var.findall(f'{{{NS}}}VariationSpecifics/{{{NS}}}NameValueList'):
+                        val_el = nvl.find(f'{{{NS}}}Value')
+                        if val_el is not None and val_el.text:
+                            attrs.append(val_el.text)
+                    attr_str = ' / '.join(attrs) if attrs else (var_sku or 'Variant')
+
+                    safe_var_sku = (var_sku or attr_str).replace(' ', '_').replace('/', '-')[:40]
+                    sku = f"EBAY-{item_id}-{safe_var_sku}"
+
                     all_items.append({
                         "sku": sku,
                         "item_id": item_id,
-                        "variation_sku": None,
-                        "product": {"title": title},
-                        "availability": {
-                            "shipToLocationAvailability": {"quantity": qty}
-                        },
-                        "price": parent_price,
+                        "variation_sku": var_sku,
+                        "product": {"title": f"{title} - {attr_str}"},
+                        "availability": {"shipToLocationAvailability": {"quantity": var_qty}},
+                        "price": var_price,
                         "image_url": img,
                     })
+            else:
+                # No variations — single listing
+                if full_item is not None:
+                    qty_el = full_item.find(f'{{{NS}}}QuantityAvailable') or full_item.find(f'{{{NS}}}Quantity')
+                    qty = int(qty_el.text) if qty_el is not None and qty_el.text else 0
+                else:
+                    qty = 0
+                sku = f"EBAY-{item_id}"
+                all_items.append({
+                    "sku": sku,
+                    "item_id": item_id,
+                    "variation_sku": None,
+                    "product": {"title": title},
+                    "availability": {"shipToLocationAvailability": {"quantity": qty}},
+                    "price": parent_price,
+                    "image_url": img,
+                })
 
-            logger.info(f"eBay listings page {page}/{total_pages}: {len(items)} items")
-            page += 1
-
-        logger.info(f"eBay GetMyeBaySelling: {len(all_items)} active listings")
+        logger.info(f"eBay get_inventory_items: {len(all_items)} total items (including variants)")
         return all_items
 
     def get_inventory_item(self, sku: str):
