@@ -122,6 +122,12 @@ class Database:
         rows = self._rest("GET", "products", params={"sku": f"eq.{sku}", "select": "*"})
         return rows[0] if rows else None
 
+    def get_all_ebay_products(self):
+        """Return all products with eBay SKUs (sku starts with EBAY- or is a numeric eBay item ID)."""
+        resp = self._req("GET", f"/products?sku=like.EBAY-*&select=id,sku,name&limit=2000")
+        return resp if isinstance(resp, list) else []
+
+
     def update_product_name(self, product_id: str, name: str):
         r = requests.patch(
             f"{self.url}/rest/v1/products",
