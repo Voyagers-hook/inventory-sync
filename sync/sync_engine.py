@@ -82,14 +82,19 @@ class SyncEngine:
             sku = item.get("sku")
             if not sku:
                 continue
+
+            # Build the clean name: "Title - Key: Value / Key: Value"
+            name = item.get("title", "") or "Unnamed"
+            if item.get("is_variant") and item.get("aspects"):
+                label = " / ".join(
+                    f"{k}: {v}" for k, v in item["aspects"].items()
+                    if v and str(v).strip()
+                )
+                if label:
+                    name = f"{name} - {label}"
+
             existing = self.db.get_product_by_sku(sku)
             if not existing:
-                name = item.get("title", "") or "Unnamed"
-                # Append variant aspects (Size, Colour etc.) to distinguish variants
-                if item.get("is_variant") and item.get("aspects"):
-                    label = " / ".join(str(v) for v in item["aspects"].values() if v)
-                    if label:
-                        name = f"{name} - {label}"
                 rows = self.db.upsert_product({
                     "name": name,
                     "sku": sku,
@@ -97,6 +102,10 @@ class SyncEngine:
                 })
                 existing = rows[0] if rows else self.db.get_product_by_sku(sku)
                 ebay_synced += 1
+            else:
+                # Always keep the name up to date (fixes stale/bad names on re-sync)
+                if existing.get("name") != name:
+                    self.db.update_product_name(existing["id"], name)
             if existing:
                 product_id = existing["id"]
                 stock_qty = item.get("quantity", 0)
@@ -507,5 +516,6 @@ class SyncEngine:
             logger.info("Quick check: no manual sync requested")
 
         return count
+
 
 
