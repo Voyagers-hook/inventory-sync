@@ -84,11 +84,11 @@ class SyncEngine:
                 continue
             existing = self.db.get_product_by_sku(sku)
             if not existing:
-                name = item.get("product", {}).get("title", "Unnamed")
+                name = item.get("title", "") or item.get("product", {}).get("title", "Unnamed")
                 rows = self.db.upsert_product({
                     "name": name,
                     "sku": sku,
-                    "description": item.get("product", {}).get("description", ""),
+                    "description": item.get("description", ""),
                 })
                 existing = rows[0] if rows else self.db.get_product_by_sku(sku)
                 ebay_synced += 1
@@ -503,4 +503,5 @@ class SyncEngine:
             logger.info("Quick check: no manual sync requested")
 
         return count
+
 
