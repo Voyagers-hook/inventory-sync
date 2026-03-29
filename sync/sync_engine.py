@@ -84,7 +84,12 @@ class SyncEngine:
                 continue
             existing = self.db.get_product_by_sku(sku)
             if not existing:
-                name = item.get("title", "") or item.get("product", {}).get("title", "Unnamed")
+                name = item.get("title", "") or "Unnamed"
+                # Append variant aspects (Size, Colour etc.) to distinguish variants
+                if item.get("is_variant") and item.get("aspects"):
+                    label = " / ".join(str(v) for v in item["aspects"].values() if v)
+                    if label:
+                        name = f"{name} - {label}"
                 rows = self.db.upsert_product({
                     "name": name,
                     "sku": sku,
@@ -94,8 +99,7 @@ class SyncEngine:
                 ebay_synced += 1
             if existing:
                 product_id = existing["id"]
-                stock_qty = item.get("availability", {}).get(
-                    "shipToLocationAvailability", {}).get("quantity", 0)
+                stock_qty = item.get("quantity", 0)
                 self.db.upsert_inventory({"product_id": product_id, "total_stock": stock_qty})
                 ebay_item_id = item.get("item_id", sku)
                 price_val = item.get("price", 0.0)
