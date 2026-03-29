@@ -33,9 +33,9 @@ SCOPES = (
 
 class EbayClient:
     def __init__(self, db=None):
-        self.app_id = os.environ["EBAY_APP_ID"]
-        self.cert_id = os.environ["EBAY_CERT_ID"]
-        self.dev_id = os.environ.get("EBAY_DEV_ID", "cd505b42-9374-4d5c-86a5-1e31f075a2f1")
+        self.app_id = os.environ["EBAY_APP_ID"].strip()
+        self.cert_id = os.environ["EBAY_CERT_ID"].strip()
+        self.dev_id = os.environ.get("EBAY_DEV_ID", "cd505b42-9374-4d5c-86a5-1e31f075a2f1").strip()
         self.db = db
         self._access_token = None
         self._token_expiry = None
@@ -47,7 +47,7 @@ class EbayClient:
         if db:
             stored_refresh = db.get_setting("ebay_refresh_token")
             if stored_refresh:
-                self.refresh_tok = stored_refresh
+                self.refresh_tok = stored_refresh.strip()
                 logger.info("Loaded eBay refresh token from Supabase (latest rotated copy)")
             else:
                 self.refresh_tok = os.environ["EBAY_REFRESH_TOKEN"]
