@@ -104,6 +104,24 @@ class SyncEngine:
                     "platform_variant_id": item.get("variation_sku"),
                 })
 
+        # Clean up old single-product entries for variation listings
+        # e.g. if EBAY-123-7m and EBAY-123-14m were imported, delete old EBAY-123
+        item_ids_with_variants = set()
+        for item in ebay_items:
+            sku = item.get("sku", "")
+            if sku.startswith("EBAY-"):
+                suffix = sku[5:]  # Remove 'EBAY-' prefix
+                dash_pos = suffix.find("-")
+                if dash_pos != -1:  # Has a variant suffix
+                    item_ids_with_variants.add(suffix[:dash_pos])
+
+        for item_id in item_ids_with_variants:
+            plain_sku = f"EBAY-{item_id}"
+            old_product = self.db.get_product_by_sku(plain_sku)
+            if old_product:
+                logger.info(f"Removing stale single-item entry {plain_sku} (variants now exist)")
+                self.db.delete_product(old_product["id"])
+
         logger.info(f"eBay catalogue: {ebay_synced} new products, {len(ebay_items)} total")
         logger.info(f"Catalogue sync complete: {synced + ebay_synced} new products added")
         return synced + ebay_synced
