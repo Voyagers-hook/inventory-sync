@@ -409,9 +409,25 @@ class SyncEngine:
     def run_full_sync(self):
         total = 0
         product_count = self.db.count_products()
-        if product_count == 0:
-            logger.info("No products in DB — running initial catalogue import...")
+
+        # Run catalogue sync if: no products at all, OR last catalogue sync was >23 hours ago
+        last_cat_sync = self.db.get_setting("last_catalogue_sync")
+        catalogue_stale = True
+        if last_cat_sync:
+            try:
+                last_cat_dt = datetime.fromisoformat(last_cat_sync.replace("Z", "+00:00"))
+                age_hours = (datetime.now(timezone.utc) - last_cat_dt).total_seconds() / 3600
+                catalogue_stale = age_hours > 23
+            except Exception:
+                catalogue_stale = True
+
+        if product_count == 0 or catalogue_stale:
+            if product_count == 0:
+                logger.info("No products in DB — running initial catalogue import...")
+            else:
+                logger.info("Catalogue stale (>23h) — refreshing eBay listings with variant expansion...")
             total += self.sync_product_catalogue()
+            self.db.set_setting("last_catalogue_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
         last = self.db.get_setting("last_full_sync")
         if last:
