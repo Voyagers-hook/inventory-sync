@@ -443,7 +443,7 @@ class SyncEngine:
                 logger.info("No products in DB — running initial catalogue import...")
             else:
                 logger.info("Catalogue stale (>23h) — refreshing eBay listings with variant expansion...")
-            total += self.sync_product_catalogue(skip_squarespace=True)
+            total += self.sync_product_catalogue()
             self.db.set_setting("last_catalogue_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
         last = self.db.get_setting("last_full_sync")
@@ -516,6 +516,3 @@ class SyncEngine:
             logger.info("Quick check: no manual sync requested")
 
         return count
-
-
-
