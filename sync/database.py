@@ -110,6 +110,19 @@ class Database:
         )
         r.raise_for_status()
 
+    def delete_product(self, product_id: str):
+        """Delete a product and its related pricing/inventory rows."""
+        # Delete platform_pricing rows first
+        requests.delete(f"{self.url}/rest/v1/platform_pricing", headers=self.headers,
+                        params={"product_id": f"eq.{product_id}"}, timeout=30)
+        # Delete inventory rows
+        requests.delete(f"{self.url}/rest/v1/inventory", headers=self.headers,
+                        params={"product_id": f"eq.{product_id}"}, timeout=30)
+        # Delete the product
+        r = requests.delete(f"{self.url}/rest/v1/products", headers=self.headers,
+                            params={"id": f"eq.{product_id}"}, timeout=30)
+        r.raise_for_status()
+
     # ─── Platform Pricing Lookups ────────────────────────────────────────────
 
     def get_platform_pricing_for_product(self, product_id: str, platform: str = None):
