@@ -107,8 +107,16 @@ class Database:
                 )
                 r.raise_for_status()
                 return r.json() if r.text else []
-        return self._rest("POST", "products", payload=product,
-                          headers_extra={"Prefer": "return=representation"})
+        try:
+            return self._rest("POST", "products", payload=product,
+                              headers_extra={"Prefer": "return=representation"})
+        except Exception as e:
+            if "409" in str(e) or "23505" in str(e) or "conflict" in str(e).lower():
+                # Duplicate SKU — fetch and return the existing row
+                logger.warning(f"Duplicate SKU insert ignored for {sku}, returning existing row")
+                rows = self._rest("GET", "products", params={"sku": f"eq.{sku}", "select": "*"})
+                return rows if rows else []
+            raise
 
     def get_product_by_sku(self, sku: str):
         rows = self._rest("GET", "products", params={"sku": f"eq.{sku}", "select": "*"})
@@ -371,3 +379,4 @@ class Database:
 
     def clear_sync_request(self):
         self.set_setting("manual_sync_requested", "false")
+
