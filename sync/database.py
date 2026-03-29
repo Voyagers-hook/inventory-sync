@@ -93,8 +93,22 @@ class Database:
         return self._rest("GET", "products", params={"select": "*", "order": "name.asc"})
 
     def upsert_product(self, product: dict):
+        sku = product.get("sku")
+        if sku:
+            existing = self._rest("GET", "products", params={"sku": f"eq.{sku}", "select": "id"})
+            if existing:
+                rec_id = existing[0]["id"]
+                r = requests.patch(
+                    f"{self.url}/rest/v1/products",
+                    headers={**self.headers, "Prefer": "return=representation"},
+                    params={"id": f"eq.{rec_id}"},
+                    json=product,
+                    timeout=30,
+                )
+                r.raise_for_status()
+                return r.json() if r.text else []
         return self._rest("POST", "products", payload=product,
-                          headers_extra={"Prefer": "resolution=merge-duplicates,return=representation"})
+                          headers_extra={"Prefer": "return=representation"})
 
     def get_product_by_sku(self, sku: str):
         rows = self._rest("GET", "products", params={"sku": f"eq.{sku}", "select": "*"})
@@ -182,8 +196,27 @@ class Database:
 
     def upsert_price(self, price_row: dict):
         price_row["updated_at"] = datetime.now(timezone.utc).isoformat()
+        product_id = price_row.get("product_id")
+        platform   = price_row.get("platform")
+        if product_id and platform:
+            existing = self._rest("GET", "platform_pricing", params={
+                "product_id": f"eq.{product_id}",
+                "platform": f"eq.{platform}",
+                "select": "id"
+            })
+            if existing:
+                rec_id = existing[0]["id"]
+                r = requests.patch(
+                    f"{self.url}/rest/v1/platform_pricing",
+                    headers={**self.headers, "Prefer": "return=representation"},
+                    params={"id": f"eq.{rec_id}"},
+                    json=price_row,
+                    timeout=30,
+                )
+                r.raise_for_status()
+                return r.json() if r.text else []
         return self._rest("POST", "platform_pricing", payload=price_row,
-                          headers_extra={"Prefer": "resolution=merge-duplicates,return=representation"})
+                          headers_extra={"Prefer": "return=representation"})
 
     def get_pending_price_changes(self):
         rows = self._rest("GET", "platform_pricing", params={"select": "*"})
