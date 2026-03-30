@@ -112,13 +112,16 @@ class SyncEngine:
                 self.db.upsert_inventory({"product_id": product_id, "total_stock": stock_qty})
                 ebay_item_id = item.get("item_id", sku)
                 price_val = item.get("price", 0.0)
+                # Store variation aspects as JSON so stock push can build VariationSpecifics
+                import json as _json
+                aspects_json = _json.dumps(item["aspects"]) if item.get("is_variant") and item.get("aspects") else None
                 self.db.upsert_price({
                     "product_id": product_id,
                     "platform": "ebay",
                     "price": float(price_val),
                     "currency": "GBP",
                     "platform_product_id": ebay_item_id,
-                    "platform_variant_id": item.get("variation_sku"),
+                    "platform_variant_id": aspects_json,
                 })
 
         # Clean up old single-product entries for variation listings
