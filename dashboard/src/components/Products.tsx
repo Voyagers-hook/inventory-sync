@@ -1,9 +1,9 @@
 import React, { useState, useCallback } from 'react';
-import { Plus, Trash2, Search, RefreshCw, AlertTriangle, Link, Unlink, X, GitMerge } from 'lucide-react';
+import { Plus, Trash2, Search, RefreshCw, AlertTriangle, Link, Unlink, X, GitMerge, Undo2 } from 'lucide-react';
 import type { Product, Inventory, Pricing } from '../types';
 import {
   createProduct, createInventory, createPricing, deleteProduct,
-  updateInventory, updatePricing, mergeProducts, updateProduct
+  updateInventory, updatePricing, mergeProducts, updateProduct, undoLastMerge, getLastMergeSnapshot
 } from '../utils/supabase';
 
 interface ProductsProps {
@@ -308,7 +308,7 @@ const MergeModal: React.FC<{
           </div>
 
           <p className="text-xs text-base-content/40 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
-            ⚠️ This cannot be undone. <strong>{removeProd.name}</strong> will be permanently deleted and its platform listings transferred to the master product.
+            ⚠️ You can undo this merge afterwards if needed. <strong>{removeProd.name}</strong> will be permanently deleted and its platform listings transferred to the master product.
           </p>
         </div>
 
@@ -335,6 +335,7 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showMerge, setShowMerge] = useState(false);
+  const [lastMerge, setLastMerge] = useState<{ removedName: string; keepName: string; timestamp: string } | null>(null);
   const [newName, setNewName] = useState('');
   const [newSku, setNewSku] = useState('');
   const [toast, setToast] = useState('');
@@ -414,12 +415,43 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
     finally { setBusy(false); }
   }, [onRefresh]);
 
+  // Check for undoable merge on mount and after merges
+  useEffect(() => {
+    getLastMergeSnapshot().then(setLastMerge).catch(() => setLastMerge(null));
+  }, [products]);
+
+  const handleUndoMerge = useCallback(async () => {
+    if (!confirm('Undo the last merge? This will restore the deleted product and separate the two products.')) return;
+    setBusy(true);
+    try {
+      const name = await undoLastMerge();
+      setLastMerge(null);
+      showToast(`Merge undone! "${name}" has been restored.`);
+      onRefresh();
+    } catch (e: any) { showToast('Failed to undo merge: ' + (e.message || e)); }
+    finally { setBusy(false); }
+  }, [onRefresh]);
+
   return (
     <div className="flex flex-col gap-4">
       {toast && (
         <div className="bg-success/10 border border-success/30 text-success rounded-xl px-4 py-3 text-sm font-medium">✓ {toast}</div>
       )}
 
+      {lastMerge && (
+        <div className="bg-warning/10 border border-warning/30 rounded-xl px-4 py-3 flex items-center justify-between">
+          <span className="text-sm text-warning-content">
+            <strong>Last merge:</strong> "{lastMerge.removedName}" was merged into "{lastMerge.keepName}"
+          </span>
+          <button
+            className="btn btn-warning btn-sm gap-1.5"
+            onClick={handleUndoMerge}
+            disabled={busy}
+          >
+            <Undo2 size={14} /> Undo merge
+          </button>
+        </div>
+      )}
       <div className="flex flex-wrap gap-2 items-center">
         <div className="flex items-center gap-2 bg-base-100 border border-base-300 rounded-xl px-3 py-2 flex-1 min-w-[180px] shadow-sm">
           <Search size={14} className="text-base-content/30 flex-shrink-0" />
@@ -626,3 +658,4 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
     </div>
   );
 };
+
