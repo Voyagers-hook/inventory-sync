@@ -17,7 +17,7 @@ def get_access_token():
     r = requests.post("https://api.ebay.com/identity/v1/oauth2/token",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         data={"grant_type": "refresh_token", "refresh_token": REFRESH_TOKEN,
-              "scope": "https://api.ebay.com/oauth/api_scope/sell.inventory"},
+              "scope": "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.fulfillment"},
         auth=(CLIENT_ID, CLIENT_SECRET))
     data = r.json()
     t = data.get("access_token")
