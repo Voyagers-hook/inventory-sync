@@ -131,16 +131,13 @@ class SquarespaceClient:
     # ─── Pricing ────────────────────────────────────────────────────────────────
 
     def update_variant_price(self, product_id: str, variant_id: str, price: float):
-        """Update the base price of a single variant."""
+        """Update the base price of a single variant via per-variant endpoint."""
         payload = {
-            "variants": [{
-                "id": variant_id,
-                "pricing": {
-                    "basePrice": {"currency": "GBP", "value": f"{price:.2f}"}
-                }
-            }]
+            "pricing": {
+                "basePrice": {"currency": "GBP", "value": f"{price:.2f}"}
+            }
         }
-        self._post(f"/commerce/products/{product_id}", payload)
+        self._post(f"/commerce/products/{product_id}/variants/{variant_id}", payload)
         logger.info(f"SS price updated product {product_id} variant {variant_id} → £{price:.2f}")
 
     # ─── Fulfillment / Tracking ────────────────────────────────────────────────
