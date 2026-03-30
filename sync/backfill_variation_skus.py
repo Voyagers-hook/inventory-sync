@@ -7,16 +7,32 @@ from collections import defaultdict
 
 SKEY = os.environ["SUPABASE_SERVICE_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
-REFRESH_TOKEN = os.environ["EBAY_REFRESH_TOKEN"]
+REFRESH_TOKEN_ENV = os.environ.get("EBAY_REFRESH_TOKEN", "").strip()
 CLIENT_ID = os.environ["EBAY_APP_ID"]
 CLIENT_SECRET = os.environ["EBAY_CERT_ID"]
 
 HEADERS_SB = {"Authorization": f"Bearer {SKEY}", "apikey": SKEY, "Content-Type": "application/json"}
 
+def get_db_refresh_token():
+    """Get the current (rotated) refresh token from Supabase settings table."""
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/settings",
+        params={"key": "eq.ebay_refresh_token", "select": "value"},
+        headers=HEADERS_SB)
+    rows = r.json()
+    if rows and rows[0].get("value"):
+        print("Using refresh token from database")
+        return rows[0]["value"].strip()
+    print("Using refresh token from environment")
+    return REFRESH_TOKEN_ENV
+
 def get_access_token():
+    refresh_token = get_db_refresh_token()
+    if not refresh_token:
+        print("ERROR: No refresh token available")
+        sys.exit(1)
     r = requests.post("https://api.ebay.com/identity/v1/oauth2/token",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
-        data={"grant_type": "refresh_token", "refresh_token": REFRESH_TOKEN,
+        data={"grant_type": "refresh_token", "refresh_token": refresh_token,
               "scope": "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.fulfillment"},
         auth=(CLIENT_ID, CLIENT_SECRET))
     data = r.json()
@@ -24,6 +40,14 @@ def get_access_token():
     if not t:
         print(f"ERROR getting token: {data}")
         sys.exit(1)
+    # Save the new refresh token if rotated
+    new_rt = data.get("refresh_token")
+    if new_rt and new_rt != refresh_token:
+        print("Saving rotated refresh token to database")
+        requests.patch(f"{SUPABASE_URL}/rest/v1/settings",
+            params={"key": "eq.ebay_refresh_token"},
+            headers=HEADERS_SB,
+            json={"value": new_rt})
     return t
 
 def trading_get_item(token, item_id):
