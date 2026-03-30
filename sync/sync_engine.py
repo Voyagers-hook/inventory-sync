@@ -347,7 +347,8 @@ class SyncEngine:
                 elif row["platform"] == "ebay":
                     ebay_item_id = row.get("platform_product_id")
                     if ebay_item_id:
-                        self.ebay.update_offer_price(ebay_item_id, float(row["price"]))
+                        variation_sku = row.get("platform_variant_id")
+                        self.ebay.update_offer_price(ebay_item_id, float(row["price"]), variation_sku)
                 self.db.mark_price_synced(row["id"])
                 pushed += 1
             except Exception as e:
