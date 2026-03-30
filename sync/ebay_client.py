@@ -460,10 +460,66 @@ class EbayClient:
             body = e.read().decode()
             raise RuntimeError(f"Trading API {call_name} failed {e.code}: {body[:300]}")
 
-    def update_offer_price(self, item_id, price):
-        logger.warning(
-            "update_offer_price: traditional seller account, skipping (%s)", item_id
+    def update_offer_price(self, item_id, price, variation_sku=None):
+        """Push price update to eBay via Trading API ReviseItem."""
+        if item_id and str(item_id).startswith("v1|"):
+            parts = str(item_id).split("|")
+            legacy_id = parts[1] if len(parts) > 1 else item_id
+        else:
+            legacy_id = str(item_id)
+
+        if not legacy_id:
+            logger.warning("update_offer_price: no valid item ID")
+            return
+
+        # Build variation XML for variant items
+        variation_xml = ""
+        item_price_xml = ""
+        if variation_sku:
+            sku_str = None
+            try:
+                parsed = json.loads(variation_sku) if isinstance(variation_sku, str) else variation_sku
+                if isinstance(parsed, dict):
+                    logger.warning("update_offer_price: platform_variant_id in old JSON format for %s, skipping", legacy_id)
+                    return
+                else:
+                    sku_str = str(variation_sku).strip()
+            except (json.JSONDecodeError, TypeError):
+                sku_str = str(variation_sku).strip()
+
+            if sku_str:
+                variation_xml = (
+                    "<Variations><Variation>"
+                    f"<SKU>{sku_str}</SKU>"
+                    f"<StartPrice currencyID='GBP'>{price:.2f}</StartPrice>"
+                    "</Variation></Variations>"
+                )
+
+        if not variation_xml:
+            # Non-variant item — price at item level
+            item_price_xml = f"<StartPrice currencyID='GBP'>{price:.2f}</StartPrice>"
+
+        xml_body = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+            "<Item>"
+            f"<ItemID>{legacy_id}</ItemID>"
+            f"{item_price_xml}"
+            f"{variation_xml}"
+            "</Item>"
+            "</ReviseItemRequest>"
         )
+
+        resp_text = self._trading_api_call("ReviseItem", xml_body)
+
+        if "<Ack>Failure</Ack>" in resp_text:
+            logger.error("ReviseItem price Failure for %s: %s", legacy_id, resp_text[:500])
+            raise RuntimeError(f"ReviseItem price failed for {legacy_id}")
+        elif "<Ack>Warning</Ack>" in resp_text:
+            logger.warning("ReviseItem price Warning for %s: %s", legacy_id, resp_text[:300])
+            logger.info("Price pushed to eBay item %s: £%.2f (with warning)", legacy_id, price)
+        else:
+            logger.info("Price pushed to eBay item %s: £%.2f", legacy_id, price)
 
     def update_inventory_quantity(self, item_id, quantity, variation_sku=None):
         """Push stock update to eBay via Trading API ReviseInventoryStatus."""
