@@ -63,7 +63,9 @@ class SyncEngine:
                 if existing:
                     product_id = existing["id"]
                     stock_qty = ss_stock_map.get(variant["id"], 0)
-                    self.db.upsert_inventory({"product_id": product_id, "total_stock": stock_qty})
+                    # Only set stock for NEW products; existing stock is managed via dashboard
+                    if not existing:
+                        self.db.upsert_inventory({"product_id": product_id, "total_stock": stock_qty})
                     price_val = variant.get("pricing", {}).get("basePrice", {}).get("value", "0")
                     self.db.upsert_price({
                         "product_id": product_id,
@@ -109,7 +111,9 @@ class SyncEngine:
             if existing:
                 product_id = existing["id"]
                 stock_qty = item.get("quantity", 0)
-                self.db.upsert_inventory({"product_id": product_id, "total_stock": stock_qty})
+                # Only set stock for NEW products; existing stock is managed via dashboard
+                if not existing:
+                    self.db.upsert_inventory({"product_id": product_id, "total_stock": stock_qty})
                 ebay_item_id = item.get("item_id", sku)
                 price_val = item.get("price", 0.0)
                 # Store variation SKU string for stock push (ReviseInventoryStatus needs <SKU> not VariationSpecifics)
