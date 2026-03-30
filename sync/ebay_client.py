@@ -1,6 +1,6 @@
 """
 eBay client using Browse API (OAuth user token, sell.inventory + sell.fulfillment scopes).
-Replaces Trading API (which requires api_scope not available to this app).
+Uses Browse API for reading, Trading API for stock/price writes.
 """
 import os
 import urllib.request
@@ -19,9 +19,7 @@ SELLER = "voyagershookfishingco"
 MARKETPLACE = "EBAY-GB"
 
 SCOPES = (
-    "https://api.ebay.com/oauth/api_scope "
-    "https://api.ebay.com/oauth/api_scope/sell.inventory "
-    "https://api.ebay.com/oauth/api_scope/sell.fulfillment"
+    "https://api.ebay.com/oauth/api_scope"
 )
 
 
