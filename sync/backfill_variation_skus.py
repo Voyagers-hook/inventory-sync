@@ -1,6 +1,8 @@
 """
-Backfill variation SKUs: match each variant DB row to its Trading API variation SKU
-by comparing product names to variation aspect values.
+Backfill variation SKUs using:
+1. Browse API getItem → get variant aspects for each row
+2. Trading API GetItem → get variation SKUs  
+3. Match aspects to get SKU → store in platform_variant_id
 """
 import os, sys, re, json, time, requests
 from collections import defaultdict
@@ -14,14 +16,13 @@ HEADERS_SB = {"Authorization": f"Bearer {SKEY}", "apikey": SKEY, "Content-Type":
 
 def get_db_refresh_token():
     r = requests.get(f"{SUPABASE_URL}/rest/v1/settings",
-        params={"key": "eq.ebay_refresh_token", "select": "value"},
-        headers=HEADERS_SB)
+        params={"key": "eq.ebay_refresh_token", "select": "value"}, headers=HEADERS_SB)
     rows = r.json()
     if rows and rows[0].get("value"):
         return rows[0]["value"].strip()
     return os.environ.get("EBAY_REFRESH_TOKEN", "").strip()
 
-def get_access_token():
+def get_user_token():
     refresh_token = get_db_refresh_token()
     r = requests.post("https://api.ebay.com/identity/v1/oauth2/token",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -31,121 +32,122 @@ def get_access_token():
     data = r.json()
     t = data.get("access_token")
     if not t:
-        print(f"ERROR getting token: {data}")
+        print(f"ERROR getting user token: {data}")
         sys.exit(1)
-    # Save rotated token
     new_rt = data.get("refresh_token")
     if new_rt and new_rt != refresh_token:
         requests.patch(f"{SUPABASE_URL}/rest/v1/settings",
             params={"key": "eq.ebay_refresh_token"}, headers=HEADERS_SB, json={"value": new_rt})
     return t
 
-def trading_get_item(token, item_id):
+def get_app_token():
+    r = requests.post("https://api.ebay.com/identity/v1/oauth2/token",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data={"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"},
+        auth=(CLIENT_ID, CLIENT_SECRET))
+    return r.json().get("access_token")
+
+def trading_get_variations(user_token, item_id):
+    """Get variations dict: aspects_tuple -> sku"""
     xml = f'''<?xml version="1.0" encoding="utf-8"?>
 <GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
   <ItemID>{item_id}</ItemID>
 </GetItemRequest>'''
     headers = {
         "X-EBAY-API-SITEID": "3", "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
-        "X-EBAY-API-IAF-TOKEN": token, "Content-Type": "text/xml",
+        "X-EBAY-API-IAF-TOKEN": user_token, "Content-Type": "text/xml",
         "X-EBAY-API-CALL-NAME": "GetItem"
     }
     r = requests.post("https://api.ebay.com/ws/api.dll", headers=headers, data=xml.encode(), timeout=15)
-    return r.text
+    variations = re.findall(r'<Variation>(.*?)</Variation>', r.text, re.DOTALL)
+    result = {}
+    for tv in variations:
+        sku_m = re.search(r'<SKU>(.*?)</SKU>', tv)
+        specs = dict(re.findall(r'<NameValueList><Name>(.*?)</Name><Value>(.*?)</Value></NameValueList>', tv))
+        if sku_m and specs:
+            # Key by sorted aspect items for matching
+            key = tuple(sorted(specs.items()))
+            result[key] = sku_m.group(1)
+    return result
 
-# Load ALL eBay pricing rows
+def browse_get_aspects(app_token, item_id):
+    """Get aspects for a specific Browse API item ID (v1|ITEMID|VARIANTID)"""
+    encoded = item_id.replace("|", "%7C")
+    r = requests.get(f"https://api.ebay.com/buy/browse/v1/item/{encoded}",
+        headers={"Authorization": f"Bearer {app_token}", "X-EBAY-C-MARKETPLACE-ID": "EBAY-GB"},
+        timeout=15)
+    if r.status_code == 200:
+        data = r.json()
+        return {a["name"]: a["value"] for a in data.get("localizedAspects", [])}
+    return None
+
+# Load all eBay pricing rows  
 resp = requests.get(f"{SUPABASE_URL}/rest/v1/platform_pricing",
     params={"platform": "eq.ebay", "select": "id,product_id,platform_product_id,platform_variant_id"},
     headers=HEADERS_SB)
 all_rows = resp.json()
 print(f"Total eBay pricing rows: {len(all_rows)}")
 
-# Load ALL products so we can look up names
-resp2 = requests.get(f"{SUPABASE_URL}/rest/v1/products",
-    params={"select": "id,name,sku"},
-    headers=HEADERS_SB)
-all_products = {p["id"]: p for p in resp2.json()}
-print(f"Total products loaded: {len(all_products)}")
-
-# Group pricing rows by parent item ID
+# Group by parent item ID - only rows with Browse API format (v1|...)
 by_item = defaultdict(list)
 for row in all_rows:
     pp = row.get("platform_product_id", "")
-    if "|" in pp:
+    if pp.startswith("v1|"):
         parts = pp.split("|")
-        item_id = parts[1] if len(parts) > 1 else ""
-    else:
-        item_id = pp
-    if item_id:
-        by_item[item_id].append(row)
+        if len(parts) == 3 and parts[2]:  # Has variant ID
+            by_item[parts[1]].append(row)
 
-# Focus on items with multiple variants
-variant_items = {k: v for k, v in by_item.items() if len(v) > 1}
-print(f"Items with 2+ variants: {len(variant_items)}")
+print(f"Items with variant IDs in Browse format: {len(by_item)}")
 
-token = get_access_token()
-print("Got access token")
+user_token = get_user_token()
+app_token = get_app_token()
+print(f"Tokens obtained: user={'OK' if user_token else 'FAIL'}, app={'OK' if app_token else 'FAIL'}")
 
 updated = 0
 skipped = 0
 errors = 0
 
-for item_id, item_rows in sorted(variant_items.items()):
+for item_id, item_rows in sorted(by_item.items()):
     try:
-        resp_text = trading_get_item(token, item_id)
-        
-        if "<Ack>Failure</Ack>" in resp_text:
-            print(f"  SKIP {item_id}: Trading API failure")
+        # Get Trading API variation SKUs for this item
+        variations_map = trading_get_variations(user_token, item_id)
+        if not variations_map:
+            # Single listing, skip
             skipped += len(item_rows)
             continue
         
-        variations = re.findall(r'<Variation>(.*?)</Variation>', resp_text, re.DOTALL)
-        if not variations:
-            skipped += len(item_rows)
-            continue
-        
-        # Build list of {sku, aspects, all_values}
-        var_list = []
-        for tv in variations:
-            sku_m = re.search(r'<SKU>(.*?)</SKU>', tv)
-            specs = dict(re.findall(r'<NameValueList><Name>(.*?)</Name><Value>(.*?)</Value></NameValueList>', tv))
-            sku = sku_m.group(1) if sku_m else None
-            all_values = list(specs.values())  # ["XS"], ["Medium"], etc.
-            var_list.append({"sku": sku, "aspects": specs, "values": all_values})
-        
-        print(f"  {item_id}: {len(variations)} vars, {len(item_rows)} rows")
+        print(f"  {item_id}: {len(variations_map)} Trading vars, {len(item_rows)} DB rows")
         
         for row in item_rows:
-            # Get the product name for this row
-            prod = all_products.get(row["product_id"], {})
-            prod_name = prod.get("name", "").lower()
+            pp = row.get("platform_product_id", "")
             
+            # Get Browse API aspects for this specific variant
+            browse_aspects = browse_get_aspects(app_token, pp)
+            if not browse_aspects:
+                print(f"    Browse API failed for {pp}")
+                skipped += 1
+                continue
+            
+            # Match Browse aspects to Trading API variations
+            # Try exact match first, then partial match
             matched_sku = None
-            best_match = None
             
-            for vd in var_list:
-                # Check if any of the variation's values appear at the end of the product name
-                # Product names look like "Mikado Predator Snaps - XS" or "Item Name - Medium - Red"
-                for val in vd["values"]:
-                    val_lower = val.lower()
-                    if prod_name.endswith(f"- {val_lower}") or prod_name.endswith(val_lower) or \
-                       f"- {val_lower} -" in prod_name or f" {val_lower}" in prod_name.split(" - ")[-1:]:
-                        best_match = vd
+            # Exact match: browse aspects subset matches trading aspects
+            for trading_key, sku in variations_map.items():
+                trading_aspects = dict(trading_key)
+                # Check if all trading aspect keys match browse aspect values
+                if all(browse_aspects.get(k) == v for k, v in trading_aspects.items()):
+                    matched_sku = sku
+                    break
+            
+            if not matched_sku:
+                # Partial match: at least one aspect value matches
+                for trading_key, sku in variations_map.items():
+                    trading_aspects = dict(trading_key)
+                    matches = sum(1 for k, v in trading_aspects.items() if browse_aspects.get(k) == v)
+                    if matches == len(trading_aspects):  # All trading aspects match
+                        matched_sku = sku
                         break
-                if best_match:
-                    break
-                
-                # Also try: product name contains the variation SKU
-                if vd["sku"] and vd["sku"].lower() in prod_name:
-                    best_match = vd
-                    break
-            
-            if best_match:
-                matched_sku = best_match["sku"]
-            
-            # Last resort: if only 1 variation and 1 row, just assign it
-            if not matched_sku and len(item_rows) == 1 and len(var_list) == 1:
-                matched_sku = var_list[0]["sku"]
             
             if matched_sku:
                 r = requests.patch(f"{SUPABASE_URL}/rest/v1/platform_pricing",
@@ -153,14 +155,17 @@ for item_id, item_rows in sorted(variant_items.items()):
                     headers=HEADERS_SB,
                     data=json.dumps({"platform_variant_id": matched_sku}))
                 if r.status_code in (200, 204):
-                    print(f"    {prod.get('name','?')[:40]} -> SKU '{matched_sku}'")
+                    variant_desc = {k: v for k, v in list(browse_aspects.items())[:2]}
+                    print(f"    {row['id'][:8]}: {variant_desc} -> '{matched_sku}'")
                     updated += 1
                 else:
-                    print(f"    ERROR {row['id'][:8]}: HTTP {r.status_code}")
+                    print(f"    DB ERROR {row['id'][:8]}: {r.status_code}")
                     errors += 1
             else:
-                print(f"    UNMATCHED: '{prod.get('name','?')[:40]}' vs {[v['values'] for v in var_list]}")
+                print(f"    UNMATCHED {row['id'][:8]}: browse={dict(list(browse_aspects.items())[:3])}")
                 skipped += 1
+            
+            time.sleep(0.1)  # Browse API rate limit
         
         time.sleep(0.2)
         
