@@ -231,11 +231,16 @@ class Database:
             })
             if existing:
                 rec_id = existing[0]["id"]
+                # Don't overwrite platform_variant_id with null if it's already set
+                # (preserves backfilled variation specifics from Trading API)
+                patch_row = dict(price_row)
+                if patch_row.get("platform_variant_id") is None:
+                    patch_row.pop("platform_variant_id", None)
                 r = requests.patch(
                     f"{self.url}/rest/v1/platform_pricing",
                     headers={**self.headers, "Prefer": "return=representation"},
                     params={"id": f"eq.{rec_id}"},
-                    json=price_row,
+                    json=patch_row,
                     timeout=30,
                 )
                 r.raise_for_status()
