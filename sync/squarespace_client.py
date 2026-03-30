@@ -136,8 +136,7 @@ class SquarespaceClient:
             "variants": [{
                 "id": variant_id,
                 "pricing": {
-                    "basePrice": {"currency": "GBP", "value": f"{price:.2f}"},
-                    "onSale": False
+                    "basePrice": {"currency": "GBP", "value": f"{price:.2f}"}
                 }
             }]
         }
