@@ -375,8 +375,50 @@ class EbayClient:
         return orders
 
     # ------------------------------------------------------------------
-    # Write operations (stubs for traditional seller)
+    # Write operations (Trading API)
     # ------------------------------------------------------------------
+
+    def _trading_api_call(self, call_name, xml_body):
+        """POST an XML request to eBay Trading API using OAuth token."""
+        token = self._get_access_token()
+        data = xml_body.encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.ebay.com/ws/api.dll",
+            data=data,
+            headers={
+                "X-EBAY-API-SITEID": "3",
+                "X-EBAY-API-CALL-NAME": call_name,
+                "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
+                "X-EBAY-API-IAF-TOKEN": token,
+                "Content-Type": "text/xml",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                logger.info("Trading API 401 — refreshing token and retrying")
+                self._access_token = None
+                self._token_expiry = 0
+                token = self._get_access_token()
+                req.headers["X-EBAY-API-IAF-TOKEN"] = token
+                # Retry once
+                req2 = urllib.request.Request(
+                    "https://api.ebay.com/ws/api.dll",
+                    data=data,
+                    headers={
+                        "X-EBAY-API-SITEID": "3",
+                        "X-EBAY-API-CALL-NAME": call_name,
+                        "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
+                        "X-EBAY-API-IAF-TOKEN": token,
+                        "Content-Type": "text/xml",
+                    },
+                )
+                with urllib.request.urlopen(req2, timeout=30) as r:
+                    return r.read().decode("utf-8")
+            body = e.read().decode()
+            raise RuntimeError(f"Trading API {call_name} failed {e.code}: {body[:300]}")
 
     def update_offer_price(self, item_id, price):
         logger.warning(
@@ -384,7 +426,54 @@ class EbayClient:
         )
 
     def update_inventory_quantity(self, item_id, quantity, variation_sku=None):
-        logger.warning(
-            "update_inventory_quantity: traditional seller account, skipping (%s)", item_id
+        """Push stock update to eBay via Trading API ReviseInventoryStatus."""
+        # Parse legacy item ID from Browse API format: v1|ITEMID|VARIATIONID
+        if item_id and str(item_id).startswith("v1|"):
+            parts = str(item_id).split("|")
+            legacy_id = parts[1] if len(parts) > 1 else item_id
+        else:
+            legacy_id = str(item_id)
+
+        if not legacy_id:
+            logger.warning("update_inventory_quantity: no valid item ID")
+            return
+
+        # Parse variation aspects from JSON stored in platform_variant_id
+        aspects = {}
+        if variation_sku:
+            try:
+                aspects = json.loads(variation_sku)
+            except (json.JSONDecodeError, TypeError):
+                pass  # Not JSON aspects, no variation specifics
+
+        # Build VariationSpecifics XML fragment
+        variation_xml = ""
+        if aspects:
+            nvl = "".join(
+                f"<NameValueList><Name>{k}</Name><Value>{v}</Value></NameValueList>"
+                for k, v in aspects.items()
+            )
+            variation_xml = f"<VariationSpecifics>{nvl}</VariationSpecifics>"
+
+        xml_body = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<ReviseInventoryStatusRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+            "<InventoryStatus>"
+            f"<ItemID>{legacy_id}</ItemID>"
+            f"<Quantity>{quantity}</Quantity>"
+            f"{variation_xml}"
+            "</InventoryStatus>"
+            "</ReviseInventoryStatusRequest>"
         )
+
+        resp_text = self._trading_api_call("ReviseInventoryStatus", xml_body)
+
+        if "<Ack>Failure</Ack>" in resp_text:
+            logger.error("ReviseInventoryStatus Failure for %s: %s", legacy_id, resp_text[:500])
+            raise RuntimeError(f"ReviseInventoryStatus failed for {legacy_id}")
+        elif "<Ack>Warning</Ack>" in resp_text:
+            logger.warning("ReviseInventoryStatus Warning for %s: %s", legacy_id, resp_text[:300])
+            logger.info("Stock pushed to eBay item %s: qty=%s (with warning)", legacy_id, quantity)
+        else:
+            logger.info("Stock pushed to eBay item %s: qty=%s", legacy_id, quantity)
 
