@@ -216,7 +216,11 @@ class Database:
         return self._rest("GET", "platform_pricing", params=params)
 
     def upsert_price(self, price_row: dict):
-        price_row["updated_at"] = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        price_row["updated_at"] = now_iso
+        # Mark as already synced so catalogue-sourced prices don't re-queue as pending changes
+        if "last_synced_at" not in price_row:
+            price_row["last_synced_at"] = now_iso
         product_id = price_row.get("product_id")
         platform   = price_row.get("platform")
         if product_id and platform:
@@ -392,4 +396,5 @@ class Database:
 
     def clear_sync_request(self):
         self.set_setting("manual_sync_requested", "false")
+
 
