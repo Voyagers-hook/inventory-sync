@@ -231,11 +231,43 @@ class EbayClient:
             _asp_maps = [{a["name"]: a["value"] for a in v.get("localizedAspects", [])} for v in _all_items]
             _all_names = {n for m in _asp_maps for n in m}
             _varying = {n for n in _all_names if len({m.get(n, "") for m in _asp_maps}) > 1}
+
+            # If Browse API returned no aspects, fall back to Trading API GetItem
+            # to get variation specifics (needed for stock push VariationSpecifics)
+            _trading_aspects_map = {}  # maps index → aspects dict
+            if not _varying and _all_items:
+                try:
+                    first_legacy = _all_items[0].get("legacyItemId", "")
+                    if first_legacy:
+                        xml_body = (
+                            '<?xml version="1.0" encoding="utf-8"?>'
+                            '<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">' +
+                            f'<ItemID>{first_legacy}</ItemID>'
+                            '<DetailLevel>ReturnAll</DetailLevel>'
+                            '</GetItemRequest>'
+                        )
+                        resp_text = self._trading_api_call("GetItem", xml_body)
+                        import re as _re
+                        trading_vars = _re.findall(r'<Variation>(.*?)</Variation>', resp_text, _re.DOTALL)
+                        for idx, tv in enumerate(trading_vars):
+                            specs = dict(_re.findall(
+                                r'<NameValueList><Name>(.*?)</Name><Value>(.*?)</Value></NameValueList>', tv))
+                            if specs:
+                                _trading_aspects_map[idx] = specs
+                        if _trading_aspects_map:
+                            logger.info("Used Trading API for aspects on item %s", first_legacy)
+                except Exception as _e:
+                    logger.debug("Trading API aspects fallback failed: %s", _e)
             for i, v in enumerate(_all_items):
                 avail = v.get("estimatedAvailabilities", [{}])[0]
                 qty = avail.get("estimatedAvailableQuantity", 0) or 0
                 _raw_asp = {a["name"]: a["value"] for a in v.get("localizedAspects", [])}
-                aspects = {k: val for k, val in _raw_asp.items() if k in _varying} if _varying else _raw_asp
+                if _varying:
+                    aspects = {k: val for k, val in _raw_asp.items() if k in _varying}
+                elif _trading_aspects_map.get(i):
+                    aspects = _trading_aspects_map[i]
+                else:
+                    aspects = _raw_asp
                 legacy_id = v.get("legacyItemId", "")
                 sku = v.get("sku") or f"{legacy_id or group_id}-v{i}"
                 entries.append({
@@ -476,4 +508,5 @@ class EbayClient:
             logger.info("Stock pushed to eBay item %s: qty=%s (with warning)", legacy_id, quantity)
         else:
             logger.info("Stock pushed to eBay item %s: qty=%s", legacy_id, quantity)
+
 
