@@ -252,8 +252,12 @@ class EbayClient:
                         for idx, tv in enumerate(trading_vars):
                             specs = dict(_re.findall(
                                 r'<NameValueList><Name>(.*?)</Name><Value>(.*?)</Value></NameValueList>', tv))
-                            if specs:
+                            # Also extract variation-level SKU (used for ReviseInventoryStatus)
+                            sku_match = _re.search(r'<SKU>(.*?)</SKU>', tv)
+                            if specs or sku_match:
                                 _trading_aspects_map[idx] = specs
+                                if sku_match:
+                                    _trading_aspects_map[idx]["_sku"] = sku_match.group(1)
                         if _trading_aspects_map:
                             logger.info("Used Trading API for aspects on item %s", first_legacy)
                 except Exception as _e:
@@ -270,6 +274,9 @@ class EbayClient:
                     aspects = _raw_asp
                 legacy_id = v.get("legacyItemId", "")
                 sku = v.get("sku") or f"{legacy_id or group_id}-v{i}"
+                # For variant items: look up Trading API SKU for this variation index
+                # This is needed for ReviseInventoryStatus (requires <SKU> not VariationSpecifics)
+                trading_sku = _trading_aspects_map.get(i, {}).get("_sku") if _trading_aspects_map else None
                 entries.append({
                     "sku": sku,
                     "title": v.get("title", raw_item.get("title", "")),
@@ -280,6 +287,7 @@ class EbayClient:
                     "group_id": group_id,
                     "aspects": aspects,
                     "is_variant": True,
+                    "variation_sku": trading_sku,
                 })
             return entries
         else:
@@ -470,25 +478,28 @@ class EbayClient:
             logger.warning("update_inventory_quantity: no valid item ID")
             return
 
-        # Parse variation aspects from JSON stored in platform_variant_id
-        aspects = {}
-        if variation_sku:
-            try:
-                if isinstance(variation_sku, dict):
-                    aspects = variation_sku  # Already a dict (from Supabase JSON column)
-                else:
-                    aspects = json.loads(variation_sku)  # JSON string fallback
-            except (json.JSONDecodeError, TypeError):
-                pass  # Not JSON aspects, no variation specifics
-
-        # Build VariationSpecifics XML fragment
+        # Build variation SKU XML fragment for ReviseInventoryStatus
+        # ReviseInventoryStatus requires <SKU> (the variation-level SKU), NOT VariationSpecifics
         variation_xml = ""
-        if aspects:
-            nvl = "".join(
-                f"<NameValueList><Name>{k}</Name><Value>{v}</Value></NameValueList>"
-                for k, v in aspects.items()
-            )
-            variation_xml = f"<VariationSpecifics>{nvl}</VariationSpecifics>"
+        if variation_sku:
+            sku_str = None
+            try:
+                # Check if it's still in old JSON aspects format e.g. {"Size": "XS"}
+                parsed = json.loads(variation_sku) if isinstance(variation_sku, str) else variation_sku
+                if isinstance(parsed, dict):
+                    # Old format: we can't reliably derive SKU from aspects alone
+                    # Log a warning - this item needs a re-sync to get the proper SKU
+                    logger.warning("platform_variant_id is in old JSON aspects format for item %s - "
+                                   "needs re-sync to get variation SKU. Stock push skipped for this item.", legacy_id)
+                    # Don't attempt the push - it will fail with "ItemID alone" error
+                    return
+                else:
+                    sku_str = str(variation_sku).strip()
+            except (json.JSONDecodeError, TypeError):
+                sku_str = str(variation_sku).strip()
+
+            if sku_str:
+                variation_xml = f"<SKU>{sku_str}</SKU>"
 
         xml_body = (
             '<?xml version="1.0" encoding="utf-8"?>'
