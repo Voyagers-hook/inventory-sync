@@ -61,7 +61,6 @@ export async function updateInventory(productId: string, data: Partial<Inventory
   if (error) throw error;
 
   // If stock is being changed, queue a push to both platforms on next sync.
-  // The sync reads stock_push_{productId} keys and pushes ONLY those products.
   if (data.total_stock !== undefined) {
     await supabase
       .from('settings')
@@ -112,8 +111,33 @@ export async function deleteProduct(id: string): Promise<void> {
 }
 
 export async function mergeProducts(keepId: string, removeId: string, keepStock: number): Promise<void> {
-  // Transfer pricing from removed product to kept product (only if kept product doesn't already have that platform)
+  // ── Save snapshot of BOTH products before merge (for undo) ──
+  const { data: removedProduct } = await supabase.from('products').select('*').eq('id', removeId).single();
   const { data: removedPricing } = await supabase.from('platform_pricing').select('*').eq('product_id', removeId);
+  const { data: removedInventory } = await supabase.from('inventory').select('*').eq('product_id', removeId).single();
+  const { data: keepProduct } = await supabase.from('products').select('*').eq('id', keepId).single();
+  const { data: keepPricing } = await supabase.from('platform_pricing').select('*').eq('product_id', keepId);
+  const { data: keepInventory } = await supabase.from('inventory').select('*').eq('product_id', keepId).single();
+
+  const snapshot = {
+    timestamp: new Date().toISOString(),
+    keepId,
+    removeId,
+    keepStock,
+    removedProduct,
+    removedPricing,
+    removedInventory,
+    keepProduct,
+    keepPricing,
+    keepInventory,
+  };
+
+  await supabase.from('settings').upsert(
+    { key: 'last_merge_snapshot', value: JSON.stringify(snapshot), updated_at: new Date().toISOString() },
+    { onConflict: 'key' }
+  );
+
+  // ── Transfer pricing from removed product to kept product ──
   if (removedPricing) {
     for (const p of removedPricing) {
       const { data: existing } = await supabase.from('platform_pricing').select('*').eq('product_id', keepId).eq('platform', p.platform);
@@ -131,6 +155,100 @@ export async function mergeProducts(keepId: string, removeId: string, keepStock:
   await supabase.from('platform_pricing').delete().eq('product_id', removeId);
   await supabase.from('inventory').delete().eq('product_id', removeId);
   await supabase.from('products').delete().eq('id', removeId);
+}
+
+/** Check if there's a merge that can be undone */
+export async function getLastMergeSnapshot(): Promise<{ removedName: string; keepName: string; timestamp: string } | null> {
+  const { data } = await supabase.from('settings').select('value').eq('key', 'last_merge_snapshot').single();
+  if (!data?.value) return null;
+  try {
+    const snap = JSON.parse(data.value);
+    return {
+      removedName: snap.removedProduct?.name || 'Unknown',
+      keepName: snap.keepProduct?.name || 'Unknown',
+      timestamp: snap.timestamp,
+    };
+  } catch { return null; }
+}
+
+/** Undo the last merge — restore the removed product and revert pricing */
+export async function undoLastMerge(): Promise<string> {
+  const { data } = await supabase.from('settings').select('value').eq('key', 'last_merge_snapshot').single();
+  if (!data?.value) throw new Error('No merge to undo');
+
+  const snap = JSON.parse(data.value);
+  const { keepId, removeId, removedProduct, removedPricing, removedInventory, keepPricing, keepInventory } = snap;
+
+  // 1. Re-create the removed product
+  const { error: prodErr } = await supabase.from('products').insert({
+    id: removedProduct.id,
+    sku: removedProduct.sku,
+    name: removedProduct.name,
+    description: removedProduct.description || '',
+    category: removedProduct.category,
+    image_url: removedProduct.image_url,
+    active: removedProduct.active,
+    cost_price: removedProduct.cost_price,
+    created_at: removedProduct.created_at,
+    updated_at: new Date().toISOString(),
+  });
+  if (prodErr) throw prodErr;
+
+  // 2. Re-create inventory for removed product
+  if (removedInventory) {
+    await supabase.from('inventory').insert({
+      product_id: removeId,
+      total_stock: removedInventory.total_stock,
+      reserved_stock: removedInventory.reserved_stock,
+      low_stock_threshold: removedInventory.low_stock_threshold,
+      location: removedInventory.location,
+      updated_at: new Date().toISOString(),
+    });
+  }
+
+  // 3. Move transferred pricing rows back to the removed product
+  // Pricing that was originally on the removed product and got moved to the kept product
+  if (removedPricing) {
+    for (const rp of removedPricing) {
+      // Check if this pricing row still exists on the kept product (it was transferred there)
+      const { data: onKept } = await supabase.from('platform_pricing')
+        .select('*')
+        .eq('product_id', keepId)
+        .eq('id', rp.id);
+      if (onKept && onKept.length > 0) {
+        // Move it back
+        await supabase.from('platform_pricing').update({ product_id: removeId, updated_at: new Date().toISOString() }).eq('id', rp.id);
+      } else {
+        // Row was deleted (kept product already had that platform) — re-create it
+        await supabase.from('platform_pricing').insert({
+          product_id: removeId,
+          platform: rp.platform,
+          price: rp.price,
+          currency: rp.currency,
+          platform_product_id: rp.platform_product_id,
+          platform_variant_id: rp.platform_variant_id,
+          last_synced_at: rp.last_synced_at,
+          updated_at: new Date().toISOString(),
+        });
+      }
+    }
+  }
+
+  // 4. Restore the kept product's original inventory
+  if (keepInventory) {
+    await supabase.from('inventory')
+      .update({ total_stock: keepInventory.total_stock, updated_at: new Date().toISOString() })
+      .eq('product_id', keepId);
+  }
+
+  // 5. Move orders/trends back if they were originally on the removed product
+  await supabase.from('orders').update({ product_id: removeId }).eq('product_id', keepId);
+  await supabase.from('sales_trends').update({ product_id: removeId }).eq('product_id', keepId);
+
+  // 6. Clear the snapshot
+  await supabase.from('settings').delete().eq('key', 'last_merge_snapshot');
+
+  return removedProduct.name;
 }
 
 // ─── GitHub Actions Trigger ───────────────────────────────────────────────────
@@ -166,4 +284,3 @@ export async function triggerQuickSync(): Promise<boolean> {
     return false;
   }
 }
-// deployed 2026-03-30T14:33:03Z
