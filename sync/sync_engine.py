@@ -532,6 +532,11 @@ class SyncEngine:
             logger.info(f"Quick check: pushed stock for {stock_pushed} platform listing(s)")
             count += stock_pushed
 
+        price_pushed = self.sync_pending_price_changes()
+        if price_pushed:
+            logger.info(f"Quick check: pushed prices for {price_pushed} platform listing(s)")
+            count += price_pushed
+
         if self.db.is_sync_requested():
             logger.info("Quick check: manual sync requested, running full sync...")
             self.db.clear_sync_request()
