@@ -474,7 +474,10 @@ class EbayClient:
         aspects = {}
         if variation_sku:
             try:
-                aspects = json.loads(variation_sku)
+                if isinstance(variation_sku, dict):
+                    aspects = variation_sku  # Already a dict (from Supabase JSON column)
+                else:
+                    aspects = json.loads(variation_sku)  # JSON string fallback
             except (json.JSONDecodeError, TypeError):
                 pass  # Not JSON aspects, no variation specifics
 
@@ -508,5 +511,6 @@ class EbayClient:
             logger.info("Stock pushed to eBay item %s: qty=%s (with warning)", legacy_id, quantity)
         else:
             logger.info("Stock pushed to eBay item %s: qty=%s", legacy_id, quantity)
+
 
 
