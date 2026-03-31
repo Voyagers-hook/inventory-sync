@@ -166,33 +166,68 @@ class EbayClient:
         return items
 
     def _get_all_summary_items(self):
-        """Paginate through all seller listing summaries."""
-        items = []
-        offset = 0
-        limit = 200
+        """Get ALL active seller listings via Trading API GetSellerList.
+        Returns items in Browse API-compatible format for _expand_item.
+        Uses Trading API instead of Browse API search to avoid missing
+        items that don't match a keyword filter.
+        """
+        import re as _re
+        from datetime import datetime, timezone, timedelta
 
-        while True:
-            url = (
-                f"https://api.ebay.com/buy/browse/v1/item_summary/search"
-                f"?q=fishing&filter=sellers%3A%7B{SELLER}%7D&limit={limit}&offset={offset}"
+        items = []
+        page_number = 1
+        total_pages = 1
+
+        # GetSellerList needs a time range — use last 120 days to cover all active listings
+        end_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        start_time = (datetime.now(timezone.utc) - timedelta(days=120)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        while page_number <= total_pages:
+            xml_body = (
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+                f'<EndTimeFrom>{start_time}</EndTimeFrom>'
+                f'<EndTimeTo>{end_time}</EndTimeTo>'
+                '<GranularityLevel>Coarse</GranularityLevel>'
+                '<IncludeVariations>true</IncludeVariations>'
+                '<Pagination>'
+                '<EntriesPerPage>200</EntriesPerPage>'
+                f'<PageNumber>{page_number}</PageNumber>'
+                '</Pagination>'
+                '</GetSellerListRequest>'
             )
             try:
-                resp = self._get(url)
+                resp_text = self._trading_api_call("GetSellerList", xml_body)
             except Exception as e:
-                logger.error("Browse search failed at offset %d: %s", offset, e)
+                logger.error("GetSellerList page %d failed: %s", page_number, e)
                 break
 
-            page = resp.get("itemSummaries", [])
-            if not page:
-                break
-            items.extend(page)
+            # Parse total pages from first response
+            tp_match = _re.search(r'<TotalNumberOfPages>(\d+)</TotalNumberOfPages>', resp_text)
+            if tp_match:
+                total_pages = int(tp_match.group(1))
 
-            total = int(resp.get("total", 0))
-            offset += limit
-            if offset >= total:
-                break
+            # Extract each Item block
+            item_blocks = _re.findall(r'<Item>(.*?)</Item>', resp_text, _re.DOTALL)
+            for block in item_blocks:
+                item_id_m = _re.search(r'<ItemID>(\d+)</ItemID>', block)
+                title_m = _re.search(r'<Title>(.*?)</Title>', block)
+                if not item_id_m:
+                    continue
+                legacy_id = item_id_m.group(1)
+                title = title_m.group(1) if title_m else ""
+                # Convert to Browse API v1 format for _expand_item compatibility
+                browse_id = f"v1|{legacy_id}|0"
+                items.append({
+                    "itemId": browse_id,
+                    "legacyItemId": legacy_id,
+                    "title": title,
+                })
 
-        logger.info("Browse API returned %d listing entries", len(items))
+            logger.info("GetSellerList page %d/%d: %d items", page_number, total_pages, len(item_blocks))
+            page_number += 1
+
+        logger.info("GetSellerList returned %d total listing entries", len(items))
         return items
 
     def _expand_item(self, raw_item, seen_groups, lock):
