@@ -19,7 +19,7 @@ export async function fetchInventory(): Promise<Inventory[]> {
 }
 
 export async function fetchPricing(): Promise<Pricing[]> {
-  const { data, error } = await supabase.from('platform_pricing').select('*');
+  const { data, error } = await supabase.from('platform_pricing').select('*').limit(5000);
   if (error) throw error;
   return data || [];
 }
