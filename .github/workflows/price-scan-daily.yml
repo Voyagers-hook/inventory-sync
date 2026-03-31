@@ -1,0 +1,32 @@
+name: Daily Price Scan
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      product_id:
+        description: 'Single product ID to scan (leave empty for full scan)'
+        required: false
+
+jobs:
+  price-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Run price scanner
+        env:
+          SUPABASE_URL: https://czoppjnkjxmduldxlbqh.supabase.co
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
+          EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
+        run: |
+          if [ -n "${{ github.event.inputs.product_id }}" ]; then
+            python sync/price_scanner.py --product "${{ github.event.inputs.product_id }}"
+          else
+            python sync/price_scanner.py
+          fi
