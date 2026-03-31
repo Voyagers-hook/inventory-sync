@@ -94,9 +94,30 @@ class SyncEngine:
 
         ebay_items = self.ebay.get_inventory_items()
         ebay_synced = 0
+
+        # Build set of eBay item IDs that already have platform_pricing entries
+        # This catches items merged into SQ products (eBay SKU deleted, but pricing remains)
+        existing_ebay_item_ids = set()
+        all_ebay_pricing = self.db._rest("GET", "platform_pricing",
+            params={"platform": "eq.ebay", "select": "platform_product_id", "limit": "5000"})
+        for ep in (all_ebay_pricing or []):
+            pid = ep.get("platform_product_id", "")
+            parts = pid.split("|")
+            if len(parts) >= 2:
+                existing_ebay_item_ids.add(parts[1])
+        logger.info(f"eBay item IDs already in platform_pricing: {len(existing_ebay_item_ids)}")
+
         for item in ebay_items:
             sku = item.get("sku")
             if not sku:
+                continue
+
+            # Skip if this eBay item ID is already linked to another product via platform_pricing
+            raw_item_id = item.get("item_id", sku)
+            # Extract bare item ID from formats like "v1|123456|0"
+            bare_id = raw_item_id.split("|")[1] if "|" in raw_item_id else raw_item_id
+            if bare_id in existing_ebay_item_ids and not self.db.get_product_by_sku(sku):
+                logger.info(f"Skipping eBay item {sku} - already linked via platform_pricing (merged)")
                 continue
 
             # Build the clean name: "Title - Key: Value / Key: Value"
