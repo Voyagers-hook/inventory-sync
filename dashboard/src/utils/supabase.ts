@@ -7,19 +7,19 @@ const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 export async function fetchProducts(): Promise<Product[]> {
-  const { data, error } = await supabase.from('products').select('*').order('name');
+  const { data, error } = await supabase.from('products').select('*').order('name').limit(5000);
   if (error) throw error;
   return data || [];
 }
 
 export async function fetchInventory(): Promise<Inventory[]> {
-  const { data, error } = await supabase.from('inventory').select('*');
+  const { data, error } = await supabase.from('inventory').select('*').limit(5000);
   if (error) throw error;
   return data || [];
 }
 
 export async function fetchPricing(): Promise<Pricing[]> {
-  const { data, error } = await supabase.from('platform_pricing').select('*');
+  const { data, error } = await supabase.from('platform_pricing').select('*').limit(5000);
   if (error) throw error;
   return data || [];
 }
