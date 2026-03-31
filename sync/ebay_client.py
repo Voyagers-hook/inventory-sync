@@ -179,8 +179,10 @@ class EbayClient:
         total_pages = 1
 
         # GetSellerList needs a time range — use last 120 days to cover all active listings
-        end_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        start_time = (datetime.now(timezone.utc) - timedelta(days=120)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        # EndTimeFrom/EndTimeTo filter by listing END date
+        # GTC listings end in the FUTURE, so search from NOW to NOW+120 days
+        start_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        end_time = (datetime.now(timezone.utc) + timedelta(days=120)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
         while page_number <= total_pages:
             xml_body = (
