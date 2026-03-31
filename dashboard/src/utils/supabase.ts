@@ -284,3 +284,45 @@ export async function triggerQuickSync(): Promise<boolean> {
     return false;
   }
 }
+
+// ─── Competitor Price Monitoring ──────────────────────────────────────────────
+
+export async function getCompetitorPrices(): Promise<Record<string, any>> {
+  const { data } = await supabase
+    .from('settings')
+    .select('key, value')
+    .like('key', 'competitor_price_%');
+  
+  const map: Record<string, any> = {};
+  if (data) {
+    for (const row of data) {
+      const productId = row.key.replace('competitor_price_', '');
+      try {
+        map[productId] = JSON.parse(row.value);
+      } catch { }
+    }
+  }
+  return map;
+}
+
+export async function triggerCompetitorCheck(productId: string): Promise<boolean> {
+  const token = import.meta.env.VITE_GITHUB_TOKEN || '';
+  if (!token) return false;
+  
+  const resp = await fetch(
+    'https://api.github.com/repos/Voyagers-hook/inventory-sync/actions/workflows/price-scan-daily.yml/dispatches',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `token ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        ref: 'main',
+        inputs: { product_id: productId }
+      })
+    }
+  );
+  return resp.ok || resp.status === 204;
+}
