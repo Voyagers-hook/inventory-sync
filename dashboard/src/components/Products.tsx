@@ -3,7 +3,8 @@ import { Plus, Trash2, Search, RefreshCw, AlertTriangle, Link, Unlink, X, GitMer
 import type { Product, Inventory, Pricing } from '../types';
 import {
   createProduct, createInventory, createPricing, deleteProduct,
-  updateInventory, updatePricing, mergeProducts, updateProduct, undoLastMerge, getLastMergeSnapshot
+  updateInventory, updatePricing, mergeProducts, updateProduct, undoLastMerge, getLastMergeSnapshot,
+  getCompetitorPrices, triggerCompetitorCheck
 } from '../utils/supabase';
 
 interface ProductsProps {
@@ -31,7 +32,12 @@ const PricingModal: React.FC<{
   pricing: Pricing[];
   onClose: () => void;
   onSave: () => void;
-}> = ({ product, inv, pricing, onClose, onSave }) => {
+  competitorPrices: Record<string, any>;
+  checkingProduct: string | null;
+  setCheckingProduct: (id: string | null) => void;
+  setCompetitorPrices: (prices: Record<string, any>) => void;
+  showToastParent: (msg: string) => void;
+}> = ({ product, inv, pricing, onClose, onSave, competitorPrices, checkingProduct, setCheckingProduct, setCompetitorPrices, showToastParent }) => {
   const ssPricing = pricing.find(p => p.product_id === product.id && p.platform === 'squarespace');
   const ebPricing = pricing.find(p => p.product_id === product.id && p.platform === 'ebay');
 
@@ -196,6 +202,48 @@ const PricingModal: React.FC<{
               </div>
             )}
           </div>
+
+          {/* Competitor Price Check */}
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <label className="text-xs font-semibold text-base-content/50 uppercase tracking-wide">Competitor Price</label>
+              <button
+                className={`btn btn-xs btn-outline ${checkingProduct === product.id ? 'loading' : ''}`}
+                disabled={checkingProduct !== null}
+                onClick={async () => {
+                  setCheckingProduct(product.id);
+                  await triggerCompetitorCheck(product.id);
+                  showToastParent('Price check triggered! Results in ~30 seconds.');
+                  setTimeout(async () => {
+                    const fresh = await getCompetitorPrices();
+                    setCompetitorPrices(fresh);
+                    setCheckingProduct(null);
+                  }, 35000);
+                }}
+              >
+                {checkingProduct === product.id ? 'Checking...' : '🔍 Check Price'}
+              </button>
+            </div>
+            {competitorPrices[product.id]?.cheapest_price && (
+              <div className="mt-2 p-2 rounded bg-base-200/50 text-sm">
+                <div className="font-medium text-base-content/70">Competitor Price</div>
+                <div className="text-lg font-bold">
+                  £{Number(competitorPrices[product.id].cheapest_price).toFixed(2)}
+                  <span className="text-xs ml-2 text-base-content/50">
+                    by {competitorPrices[product.id].cheapest_seller}
+                  </span>
+                </div>
+                {competitorPrices[product.id].cheapest_url && (
+                  <a href={competitorPrices[product.id].cheapest_url} target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline">
+                    View listing →
+                  </a>
+                )}
+                <div className="text-xs text-base-content/40 mt-1">
+                  Checked: {new Date(competitorPrices[product.id].checked_at).toLocaleString()}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Footer */}
@@ -341,6 +389,8 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
   const [toast, setToast] = useState('');
   const [busy, setBusy] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const [competitorPrices, setCompetitorPrices] = useState<Record<string, any>>({});
+  const [checkingProduct, setCheckingProduct] = useState<string | null>(null);
 
   React.useEffect(() => {
     if (initialLowStockFilter) {
@@ -348,6 +398,10 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
       onFilterApplied?.();
     }
   }, [initialLowStockFilter, onFilterApplied]);
+
+  React.useEffect(() => {
+    getCompetitorPrices().then(setCompetitorPrices);
+  }, []);
 
   const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
@@ -502,6 +556,7 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
                   <th className="font-semibold text-right">Stock</th>
                   <th className="font-semibold text-right hidden md:table-cell">SS Price</th>
                   <th className="font-semibold text-right hidden md:table-cell">eBay Price</th>
+                  <th className="font-semibold text-center hidden lg:table-cell">Comp.</th>
                   <th></th>
                 </tr>
               </thead>
@@ -560,6 +615,16 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
                           {ebPr ? `£${Number(ebPr.price).toFixed(2)}` : <span className="text-base-content/20">—</span>}
                         </span>
                       </td>
+                      <td className="text-center hidden lg:table-cell whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                        {(() => {
+                          const comp = competitorPrices[p.id];
+                          if (!comp || !comp.checked_at) return <span className="text-xs text-base-content/20">—</span>;
+                          if (comp.status === 'cheapest') return <span title={`Cheapest! Comp: £${comp.cheapest_price?.toFixed(2)}`} className="inline-flex px-1.5 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700">🟢</span>;
+                          if (comp.status === 'close') return <span title={`Close: £${comp.cheapest_price?.toFixed(2)}`} className="inline-flex px-1.5 py-0.5 rounded text-xs font-bold bg-yellow-100 text-yellow-700">🟡</span>;
+                          if (comp.status === 'undercut') return <span title={`Undercut! £${comp.cheapest_price?.toFixed(2)}`} className="inline-flex px-1.5 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700">🔴</span>;
+                          return <span className="text-xs text-base-content/30">⚪</span>;
+                        })()}
+                      </td>
                       <td onClick={e => e.stopPropagation()}>
                         <button
                           className="btn btn-ghost btn-xs text-error opacity-40 hover:opacity-100"
@@ -605,6 +670,11 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
           pricing={pricing}
           onClose={() => setSelectedProduct(null)}
           onSave={onRefresh}
+          competitorPrices={competitorPrices}
+          checkingProduct={checkingProduct}
+          setCheckingProduct={setCheckingProduct}
+          setCompetitorPrices={setCompetitorPrices}
+          showToastParent={showToast}
         />
       )}
 
