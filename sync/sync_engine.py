@@ -140,6 +140,10 @@ class SyncEngine:
                     name = prod_name
                 if sku in merged_skus:
                     continue
+                # Check if this SS variant is already linked to a merged product
+                # (catches cases where SS SKU wasn't added to merged_skus blocklist)
+                if self.db.get_platform_pricing_by_variant_id("squarespace", variant.get("id")):
+                    continue
                 existing = self.db.get_product_by_sku(sku)
                 is_new_product = existing is None
                 if not existing:
