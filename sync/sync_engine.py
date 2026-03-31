@@ -473,7 +473,7 @@ class SyncEngine:
             try:
                 last_cat_dt = datetime.fromisoformat(last_cat_sync.replace("Z", "+00:00"))
                 age_hours = (datetime.now(timezone.utc) - last_cat_dt).total_seconds() / 3600
-                catalogue_stale = age_hours > 23
+                catalogue_stale = age_hours > 4
             except Exception:
                 catalogue_stale = True
 
@@ -481,7 +481,7 @@ class SyncEngine:
             if product_count == 0:
                 logger.info("No products in DB — running initial catalogue import...")
             else:
-                logger.info("Catalogue stale (>23h) — refreshing eBay listings with variant expansion...")
+                logger.info("Catalogue stale (>4h) — refreshing eBay listings with variant expansion...")
             total += self.sync_product_catalogue()
             self.db.set_setting("last_catalogue_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
