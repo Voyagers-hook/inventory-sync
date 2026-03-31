@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Plus, Trash2, Search, RefreshCw, AlertTriangle, Link, Unlink, X, GitMerge, Undo2 } from 'lucide-react';
 import type { Product, Inventory, Pricing } from '../types';
 import {
