@@ -31,6 +31,7 @@ const PricingModal: React.FC<{
   pricing: Pricing[];
   onClose: () => void;
   onSave: () => void;
+}> = ({ product, inv, pricing, onClose, onSave }) => {
 
   const ssPricing = pricing.find(p => p.product_id === product.id && p.platform === 'squarespace');
   const ebPricing = pricing.find(p => p.product_id === product.id && p.platform === 'ebay');
