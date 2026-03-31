@@ -23,6 +23,17 @@ class SyncEngine:
         logger.info("Syncing product catalogue from both platforms...")
         synced = 0
 
+        # Load merged SKUs so we don't recreate products the user intentionally merged
+        merged_skus_raw = self.db.get_setting("merged_skus")
+        merged_skus = set()
+        if merged_skus_raw:
+            try:
+                import json
+                merged_skus = set(json.loads(merged_skus_raw))
+                logger.info(f"Skipping {len(merged_skus)} merged SKU(s)")
+            except Exception:
+                pass
+
         if skip_squarespace:
             logger.info("Skipping Squarespace sync")
             ss_products = []
@@ -47,6 +58,8 @@ class SyncEngine:
                     name = f"{prod_name} - {label}" if label else prod_name
                 else:
                     name = prod_name
+                if sku in merged_skus:
+                    continue
                 existing = self.db.get_product_by_sku(sku)
                 if not existing:
                     rows = self.db.upsert_product({
@@ -95,6 +108,8 @@ class SyncEngine:
                 if label:
                     name = f"{name} - {label}"
 
+            if sku in merged_skus:
+                continue
             existing = self.db.get_product_by_sku(sku)
             if not existing:
                 rows = self.db.upsert_product({
