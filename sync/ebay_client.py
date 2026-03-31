@@ -99,7 +99,6 @@ class EbayClient:
             try:
                 expiry = int(expiry_str)
             except ValueError:
-                # Stored as ISO datetime string e.g. "2026-03-29T13:09:19.636903+00:00"
                 try:
                     from datetime import datetime, timezone
                     dt = datetime.fromisoformat(expiry_str)
@@ -136,40 +135,13 @@ class EbayClient:
             raise RuntimeError(f"eBay API {e.code}: {body[:300]}")
 
     # ------------------------------------------------------------------
-    # Listing retrieval
+    # Listing retrieval — Full catalogue (used only for initial import or Sync Now)
     # ------------------------------------------------------------------
-
-    def _get_inventory_api_items(self):
-        """
-        Try eBay Sell Inventory API to get ALL inventory items including zero-stock.
-        Only works for managed listings. Returns [] gracefully if not available.
-        """
-        items = []
-        offset = 0
-        limit = 200
-        try:
-            while True:
-                url = f"https://api.ebay.com/sell/inventory/v1/inventory_item?limit={limit}&offset={offset}"
-                resp = self._get(url)
-                page = resp.get("inventoryItems", [])
-                if not page:
-                    break
-                items.extend(page)
-                total = int(resp.get("total", 0))
-                offset += limit
-                if offset >= total:
-                    break
-            logger.info("Inventory API returned %d items", len(items))
-        except Exception as e:
-            logger.info("Inventory API not available (traditional listings): %s", e)
-            return []
-        return items
 
     def _get_all_summary_items(self):
         """Get ALL active seller listings via Trading API GetSellerList.
         Returns items in Browse API-compatible format for _expand_item.
-        Uses Trading API instead of Browse API search to avoid missing
-        items that don't match a keyword filter.
+        Only used for initial import or when user presses Sync Now.
         """
         import re as _re
         from datetime import datetime, timezone, timedelta
@@ -178,9 +150,6 @@ class EbayClient:
         page_number = 1
         total_pages = 1
 
-        # GetSellerList needs a time range — use last 120 days to cover all active listings
-        # EndTimeFrom/EndTimeTo filter by listing END date
-        # GTC listings end in the FUTURE, so search from NOW to NOW+120 days
         start_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         end_time = (datetime.now(timezone.utc) + timedelta(days=120)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -204,12 +173,10 @@ class EbayClient:
                 logger.error("GetSellerList page %d failed: %s", page_number, e)
                 break
 
-            # Parse total pages from first response
             tp_match = _re.search(r'<TotalNumberOfPages>(\d+)</TotalNumberOfPages>', resp_text)
             if tp_match:
                 total_pages = int(tp_match.group(1))
 
-            # Extract each Item block
             item_blocks = _re.findall(r'<Item>(.*?)</Item>', resp_text, _re.DOTALL)
             for block in item_blocks:
                 item_id_m = _re.search(r'<ItemID>(\d+)</ItemID>', block)
@@ -218,7 +185,6 @@ class EbayClient:
                     continue
                 legacy_id = item_id_m.group(1)
                 title = title_m.group(1) if title_m else ""
-                # Convert to Browse API v1 format for _expand_item compatibility
                 browse_id = f"v1|{legacy_id}|0"
                 items.append({
                     "itemId": browse_id,
@@ -230,6 +196,65 @@ class EbayClient:
             page_number += 1
 
         logger.info("GetSellerList returned %d total listing entries", len(items))
+        return items
+
+    def get_new_listings(self, since_timestamp):
+        """Get only listings NEWLY CREATED since since_timestamp using StartTimeFrom filter.
+        Much faster than full catalogue — only returns listings listed after that timestamp.
+        Used by incremental hourly sync.
+        """
+        import re as _re
+        from datetime import datetime, timezone, timedelta
+
+        items = []
+        page_number = 1
+        total_pages = 1
+
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        while page_number <= total_pages:
+            xml_body = (
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+                f'<StartTimeFrom>{since_timestamp}</StartTimeFrom>'
+                f'<StartTimeTo>{now_str}</StartTimeTo>'
+                '<GranularityLevel>Coarse</GranularityLevel>'
+                '<IncludeVariations>true</IncludeVariations>'
+                '<Pagination>'
+                '<EntriesPerPage>200</EntriesPerPage>'
+                f'<PageNumber>{page_number}</PageNumber>'
+                '</Pagination>'
+                '</GetSellerListRequest>'
+            )
+            try:
+                resp_text = self._trading_api_call("GetSellerList", xml_body)
+            except Exception as e:
+                logger.error("GetSellerList (new listings) page %d failed: %s", page_number, e)
+                break
+
+            tp_match = _re.search(r'<TotalNumberOfPages>(\d+)</TotalNumberOfPages>', resp_text)
+            if tp_match:
+                total_pages = int(tp_match.group(1))
+
+            item_blocks = _re.findall(r'<Item>(.*?)</Item>', resp_text, _re.DOTALL)
+            for block in item_blocks:
+                item_id_m = _re.search(r'<ItemID>(\d+)</ItemID>', block)
+                title_m = _re.search(r'<Title>(.*?)</Title>', block)
+                if not item_id_m:
+                    continue
+                legacy_id = item_id_m.group(1)
+                title = title_m.group(1) if title_m else ""
+                browse_id = f"v1|{legacy_id}|0"
+                items.append({
+                    "itemId": browse_id,
+                    "legacyItemId": legacy_id,
+                    "title": title,
+                })
+
+            logger.info("GetSellerList (new) page %d/%d: %d items", page_number, total_pages, len(item_blocks))
+            page_number += 1
+
+        logger.info("GetSellerList new listings since %s: %d found", since_timestamp, len(items))
         return items
 
     def _expand_item(self, raw_item, seen_groups, lock):
@@ -260,16 +285,12 @@ class EbayClient:
                 return []
 
             entries = []
-            # Determine which aspects actually vary between variants
-            # (excludes brand, country, fishing type etc. that are the same on all variants)
             _all_items = group_data.get("items", [])
             _asp_maps = [{a["name"]: a["value"] for a in v.get("localizedAspects", [])} for v in _all_items]
             _all_names = {n for m in _asp_maps for n in m}
             _varying = {n for n in _all_names if len({m.get(n, "") for m in _asp_maps}) > 1}
 
-            # If Browse API returned no aspects, fall back to Trading API GetItem
-            # to get variation specifics (needed for stock push VariationSpecifics)
-            _trading_aspects_map = {}  # maps index → aspects dict
+            _trading_aspects_map = {}
             if not _varying and _all_items:
                 try:
                     first_legacy = _all_items[0].get("legacyItemId", "")
@@ -287,7 +308,6 @@ class EbayClient:
                         for idx, tv in enumerate(trading_vars):
                             specs = dict(_re.findall(
                                 r'<NameValueList><Name>(.*?)</Name><Value>(.*?)</Value></NameValueList>', tv))
-                            # Also extract variation-level SKU (used for ReviseInventoryStatus)
                             sku_match = _re.search(r'<SKU>(.*?)</SKU>', tv)
                             if specs or sku_match:
                                 _trading_aspects_map[idx] = specs
@@ -309,8 +329,6 @@ class EbayClient:
                     aspects = _raw_asp
                 legacy_id = v.get("legacyItemId", "")
                 sku = v.get("sku") or f"{legacy_id or group_id}-v{i}"
-                # For variant items: look up Trading API SKU for this variation index
-                # This is needed for ReviseInventoryStatus (requires <SKU> not VariationSpecifics)
                 trading_sku = _trading_aspects_map.get(i, {}).get("_sku") if _trading_aspects_map else None
                 entries.append({
                     "sku": sku,
@@ -346,8 +364,7 @@ class EbayClient:
     def get_inventory_items(self):
         """
         Return all active eBay listings, one entry per variant (or single item).
-        Merges Browse API (in-stock) with Inventory API (zero-stock managed listings).
-        Each entry: {sku, title, price, quantity, item_id, legacy_item_id, group_id, aspects, is_variant}
+        Used only for initial import or full catalogue refresh (Sync Now).
         """
         raw_items = self._get_all_summary_items()
         if not raw_items:
@@ -371,34 +388,7 @@ class EbayClient:
                 except Exception as e:
                     logger.warning("Item expansion error: %s", e)
 
-        logger.info("Expanded to %d total variant/item entries from Browse API", len(results))
-
-        # Supplement with Inventory API to catch zero-stock managed listings
-        inv_items = self._get_inventory_api_items()
-        if inv_items:
-            browse_skus = {r["sku"] for r in results}
-            for inv in inv_items:
-                sku = inv.get("sku", "")
-                if not sku or sku in browse_skus:
-                    continue  # Already have this item in-stock from Browse API
-                product = inv.get("product", {})
-                offers = inv.get("offers", [])
-                price = 0.0
-                if offers:
-                    price = float(offers[0].get("pricingSummary", {}).get("price", {}).get("value", 0) or 0)
-                results.append({
-                    "sku": sku,
-                    "title": product.get("title", sku),
-                    "price": price,
-                    "quantity": 0,
-                    "item_id": sku,
-                    "legacy_item_id": "",
-                    "group_id": None,
-                    "aspects": {},
-                    "is_variant": False,
-                })
-            logger.info("After Inventory API merge: %d total entries", len(results))
-
+        logger.info("Expanded to %d total variant/item entries", len(results))
         return results
 
     # ------------------------------------------------------------------
@@ -477,8 +467,6 @@ class EbayClient:
                 self._access_token = None
                 self._token_expiry = 0
                 token = self._get_access_token()
-                req.headers["X-EBAY-API-IAF-TOKEN"] = token
-                # Retry once
                 req2 = urllib.request.Request(
                     "https://api.ebay.com/ws/api.dll",
                     data=data,
@@ -507,7 +495,6 @@ class EbayClient:
             logger.warning("update_offer_price: no valid item ID")
             return
 
-        # Build variation XML for variant items
         variation_xml = ""
         item_price_xml = ""
         if variation_sku:
@@ -531,7 +518,6 @@ class EbayClient:
                 )
 
         if not variation_xml:
-            # Non-variant item — price at item level
             item_price_xml = f"<StartPrice currencyID='GBP'>{price:.2f}</StartPrice>"
 
         xml_body = (
@@ -558,7 +544,6 @@ class EbayClient:
 
     def update_inventory_quantity(self, item_id, quantity, variation_sku=None):
         """Push stock update to eBay via Trading API ReviseInventoryStatus."""
-        # Parse legacy item ID from Browse API format: v1|ITEMID|VARIATIONID
         if item_id and str(item_id).startswith("v1|"):
             parts = str(item_id).split("|")
             legacy_id = parts[1] if len(parts) > 1 else item_id
@@ -569,20 +554,14 @@ class EbayClient:
             logger.warning("update_inventory_quantity: no valid item ID")
             return
 
-        # Build variation SKU XML fragment for ReviseInventoryStatus
-        # ReviseInventoryStatus requires <SKU> (the variation-level SKU), NOT VariationSpecifics
         variation_xml = ""
         if variation_sku:
             sku_str = None
             try:
-                # Check if it's still in old JSON aspects format e.g. {"Size": "XS"}
                 parsed = json.loads(variation_sku) if isinstance(variation_sku, str) else variation_sku
                 if isinstance(parsed, dict):
-                    # Old format: we can't reliably derive SKU from aspects alone
-                    # Log a warning - this item needs a re-sync to get the proper SKU
                     logger.warning("platform_variant_id is in old JSON aspects format for item %s - "
                                    "needs re-sync to get variation SKU. Stock push skipped for this item.", legacy_id)
-                    # Don't attempt the push - it will fail with "ItemID alone" error
                     return
                 else:
                     sku_str = str(variation_sku).strip()
@@ -613,6 +592,3 @@ class EbayClient:
             logger.info("Stock pushed to eBay item %s: qty=%s (with warning)", legacy_id, quantity)
         else:
             logger.info("Stock pushed to eBay item %s: qty=%s", legacy_id, quantity)
-
-
-
