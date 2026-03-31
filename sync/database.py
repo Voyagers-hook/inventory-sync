@@ -177,6 +177,18 @@ class Database:
         prod_rows = self._rest("GET", "products", params={"id": f"eq.{product_id}", "select": "*"})
         return prod_rows[0] if prod_rows else None
 
+    def get_platform_pricing_by_variant_id(self, platform: str, variant_id: str):
+        """Return product_id if this platform variant_id is already linked to any product.
+        Used to detect merged products where SS SKU wasn't added to merged_skus blocklist."""
+        if not variant_id:
+            return None
+        rows = self._rest("GET", "platform_pricing", params={
+            "platform": f"eq.{platform}",
+            "platform_variant_id": f"eq.{variant_id}",
+            "select": "product_id",
+        })
+        return rows[0]["product_id"] if rows else None
+
     # ─── Inventory ───────────────────────────────────────────────────────────
 
     def get_inventory(self, product_id: str = None):
