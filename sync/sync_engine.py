@@ -473,7 +473,7 @@ class SyncEngine:
             try:
                 last_cat_dt = datetime.fromisoformat(last_cat_sync.replace("Z", "+00:00"))
                 age_hours = (datetime.now(timezone.utc) - last_cat_dt).total_seconds() / 3600
-                catalogue_stale = age_hours > 4
+                catalogue_stale = age_hours > 2
             except Exception:
                 catalogue_stale = True
 
@@ -481,7 +481,7 @@ class SyncEngine:
             if product_count == 0:
                 logger.info("No products in DB — running initial catalogue import...")
             else:
-                logger.info("Catalogue stale (>4h) — refreshing eBay listings with variant expansion...")
+                logger.info("Catalogue stale (>2h) — refreshing eBay listings with variant expansion...")
             total += self.sync_product_catalogue()
             self.db.set_setting("last_catalogue_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
@@ -553,8 +553,10 @@ class SyncEngine:
             count += price_pushed
 
         if self.db.is_sync_requested():
-            logger.info("Quick check: manual sync requested, running full sync...")
+            logger.info("Quick check: manual sync requested — forcing full catalogue refresh...")
             self.db.clear_sync_request()
+            # Reset last_catalogue_sync so run_full_sync will always refresh the catalogue
+            self.db.set_setting("last_catalogue_sync", "2000-01-01T00:00:00Z")
             count += self.run_full_sync()
         else:
             logger.info("Quick check: no manual sync requested")
