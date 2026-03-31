@@ -31,9 +31,7 @@ const PricingModal: React.FC<{
   pricing: Pricing[];
   onClose: () => void;
   onSave: () => void;
-  checkingProduct: string | null;
-  setCheckingProduct: (id: string | null) => void;
-  showToastParent: (msg: string) => void;
+
   const ssPricing = pricing.find(p => p.product_id === product.id && p.platform === 'squarespace');
   const ebPricing = pricing.find(p => p.product_id === product.id && p.platform === 'ebay');
 
@@ -199,27 +197,7 @@ const PricingModal: React.FC<{
             )}
           </div>
 
-          <div>
-            <div className="flex items-center gap-2 mb-2">
-              <button
-                className={`btn btn-xs btn-outline ${checkingProduct === product.id ? 'loading' : ''}`}
-                disabled={checkingProduct !== null}
-                onClick={async () => {
-                  setCheckingProduct(product.id);
-                  showToastParent('Price check triggered! Results in ~30 seconds.');
-                  setTimeout(async () => {
-                    setCheckingProduct(null);
-                  }, 35000);
-                }}
-              >
-                {checkingProduct === product.id ? 'Checking...' : '🔍 Check Price'}
-              </button>
-            </div>
-                <div className="text-xs text-base-content/40 mt-1">
-                </div>
-              </div>
-            )}
-          </div>
+
         </div>
 
         {/* Footer */}
@@ -365,7 +343,7 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
   const [toast, setToast] = useState('');
   const [busy, setBusy] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
-  const [checkingProduct, setCheckingProduct] = useState<string | null>(null);
+
 
   React.useEffect(() => {
     if (initialLowStockFilter) {
@@ -393,12 +371,7 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
     setCheckedIds(prev => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
-      else if (next.size < 2) next.add(id);
-      else {
-        const [first] = next;
-        next.delete(first);
-        next.add(id);
-      }
+      else next.add(id);
       return next;
     });
   }, []);
@@ -430,6 +403,21 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
     } catch { showToast('Failed to delete'); }
     finally { setBusy(false); }
   }, [onRefresh]);
+
+  const handleBulkDelete = useCallback(async () => {
+    const count = checkedIds.size;
+    if (!confirm(`Delete ${count} selected product${count > 1 ? 's' : ''}? This cannot be undone.`)) return;
+    setBusy(true);
+    try {
+      for (const id of checkedIds) {
+        await deleteProduct(id);
+      }
+      setCheckedIds(new Set());
+      showToast(`Deleted ${count} product${count > 1 ? 's' : ''}`);
+      onRefresh();
+    } catch { showToast('Failed to delete some products'); }
+    finally { setBusy(false); }
+  }, [checkedIds, onRefresh]);
 
   const handleMerge = useCallback(async (keepId: string, removeId: string, stock: number) => {
     setBusy(true);
@@ -518,11 +506,30 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
               <thead>
                 <tr className="bg-base-200/60 text-base-content/50 text-xs uppercase tracking-wide">
                   <th className="w-8">
-                    {checkedIds.size > 0 && (
-                      <button className="btn btn-ghost btn-xs" onClick={() => setCheckedIds(new Set())} title="Clear selection">
-                        <X size={12} />
-                      </button>
-                    )}
+                    <div
+                      className={`w-4 h-4 rounded border-2 flex items-center justify-center cursor-pointer transition-all ${
+                        checkedIds.size === filtered.length && filtered.length > 0
+                          ? 'bg-primary border-primary'
+                          : checkedIds.size > 0
+                          ? 'bg-primary/50 border-primary'
+                          : 'border-base-300 hover:border-primary'
+                      }`}
+                      onClick={() => {
+                        if (checkedIds.size === filtered.length) {
+                          setCheckedIds(new Set());
+                        } else {
+                          setCheckedIds(new Set(filtered.map(p => p.id)));
+                        }
+                      }}
+                      title={checkedIds.size === filtered.length ? "Deselect all" : "Select all"}
+                    >
+                      {checkedIds.size === filtered.length && filtered.length > 0 && (
+                        <svg width="10" height="8" viewBox="0 0 10 8" fill="none"><path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                      )}
+                      {checkedIds.size > 0 && checkedIds.size < filtered.length && (
+                        <div className="w-2 h-0.5 bg-white rounded" />
+                      )}
+                    </div>
                   </th>
                   <th className="font-semibold">Product</th>
                   <th className="font-semibold hidden sm:table-cell">SKU</th>
@@ -588,11 +595,7 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
                           {ebPr ? `£${Number(ebPr.price).toFixed(2)}` : <span className="text-base-content/20">—</span>}
                         </span>
                       </td>
-                      <td className="text-center hidden lg:table-cell whitespace-nowrap" onClick={e => e.stopPropagation()}>
-                        {(() => {
-                          return <span className="text-xs text-base-content/30">⚪</span>;
-                        })()}
-                      </td>
+
                       <td onClick={e => e.stopPropagation()}>
                         <button
                           className="btn btn-ghost btn-xs text-error opacity-40 hover:opacity-100"
@@ -638,9 +641,7 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
           pricing={pricing}
           onClose={() => setSelectedProduct(null)}
           onSave={onRefresh}
-          checkingProduct={checkingProduct}
-          setCheckingProduct={setCheckingProduct}
-          showToastParent={showToast}
+
         />
       )}
 
@@ -659,27 +660,22 @@ export const Products: React.FC<ProductsProps> = ({ products, inventory, pricing
       {/* Floating merge bar — appears whenever items are checked */}
       {checkedIds.size > 0 && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 bg-white border border-base-300 shadow-2xl rounded-2xl px-5 py-3 transition-all">
-          <div className="flex items-center gap-2 text-sm font-medium text-base-content/70">
-            <div className="flex gap-1">
-              {checkedProducts.map(p => (
-                <span key={p.id} className="inline-flex items-center gap-1 bg-primary/10 text-primary text-xs font-semibold rounded-lg px-2 py-1">
-                  {p.name.length > 22 ? p.name.slice(0, 22) + '…' : p.name}
-                  <button onClick={(e) => { e.stopPropagation(); toggleCheck(p.id, e as any); }} className="ml-0.5 hover:text-error transition-colors">
-                    <X size={11} />
-                  </button>
-                </span>
-              ))}
-            </div>
-          </div>
-          {checkedIds.size === 1 && (
-            <span className="text-xs text-base-content/40 border-l border-base-300 pl-3">Tick one more to merge</span>
-          )}
+          <span className="text-sm font-semibold text-base-content/70">
+            {checkedIds.size} selected
+          </span>
+          <button
+            className="btn btn-error btn-sm gap-1.5"
+            onClick={handleBulkDelete}
+            disabled={busy}
+          >
+            <Trash2 size={14} /> Delete{checkedIds.size > 1 ? ` (${checkedIds.size})` : ''}
+          </button>
           {checkedIds.size === 2 && (
             <button
-              className="btn btn-primary btn-sm gap-1.5 border-l border-base-300 pl-3 rounded-l-none -mr-2 pr-4"
+              className="btn btn-primary btn-sm gap-1.5"
               onClick={() => setShowMerge(true)}
             >
-              <GitMerge size={14} /> Merge into one
+              <GitMerge size={14} /> Merge
             </button>
           )}
           <button
