@@ -1,6 +1,21 @@
 """
-Supabase (PostgreSQL) database client.
-All DB interactions go through this module.
+Supabase (PostgreSQL) database client — v2
+
+Schema used:
+  products        — product groups (id, name, sku [legacy], status, cost_price, ...)
+  variants        — individual SKUs (id, product_id, internal_sku, needs_sync, last_synced_at)
+  inventory       — stock levels  (id, variant_id, product_id [legacy], total_stock, low_stock_threshold)
+  channel_listings— per-platform listings (id, variant_id, channel, channel_sku,
+                    channel_price, channel_product_id, channel_variant_id, last_synced_at)
+  orders          — sales records
+  sales_trends    — daily snapshot data
+  sync_log        — audit log
+  settings        — key-value store
+
+SYNC FLAG:
+  Editing stock or prices → sets variants.needs_sync = TRUE
+  Hourly GitHub Actions job → finds needs_sync=TRUE rows → pushes → sets needs_sync=FALSE
+  No more stock_push_* settings entries.
 """
 import os
 import json
@@ -10,11 +25,14 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
+SUPABASE_URL_ENV = "SUPABASE_URL"
+SUPABASE_KEY_ENV = "SUPABASE_SERVICE_KEY"
+
 
 class Database:
     def __init__(self):
-        self.url = os.environ["SUPABASE_URL"].rstrip("/")
-        self.key = os.environ["SUPABASE_SERVICE_KEY"]
+        self.url = os.environ[SUPABASE_URL_ENV].rstrip("/")
+        self.key = os.environ[SUPABASE_KEY_ENV]
         self.headers = {
             "apikey": self.key,
             "Authorization": f"Bearer {self.key}",
@@ -32,236 +50,275 @@ class Database:
         r.raise_for_status()
         return r.json() if r.text else []
 
-    # ─── Settings (key-value) ────────────────────────────────────────────────
+    def _patch(self, table, params, payload):
+        r = requests.patch(
+            f"{self.url}/rest/v1/{table}",
+            headers={**self.headers, "Prefer": "return=representation"},
+            params=params,
+            json=payload,
+            timeout=30,
+        )
+        r.raise_for_status()
+        return r.json() if r.text else []
 
-    def count_products(self):
-        rows = self._rest("GET", "products", params={"select": "id"})
-        return len(rows)
+    def _delete(self, table, params):
+        r = requests.delete(
+            f"{self.url}/rest/v1/{table}",
+            headers={k: v for k, v in self.headers.items() if k != "Prefer"},
+            params=params,
+            timeout=30,
+        )
+        r.raise_for_status()
+
+    # ─── Settings ────────────────────────────────────────────────────────────
 
     def get_setting(self, key: str):
         rows = self._rest("GET", "settings", params={"key": f"eq.{key}", "select": "value"})
         return rows[0]["value"] if rows else None
 
     def set_setting(self, key: str, value: str):
-        self._rest("POST", "settings", payload={"key": key, "value": str(value)},
+        self._rest("POST", "settings",
+                   payload={"key": key, "value": str(value) if value is not None else None},
                    headers_extra={"Prefer": "resolution=merge-duplicates,return=representation"})
 
-    # ─── Stock Push Queue ────────────────────────────────────────────────────
-    # Each queued push is stored as a settings row: key=stock_push_{product_id}, value=new_stock_int
-    # This means only EXPLICITLY changed products ever get pushed to platforms.
-
-    def queue_stock_push(self, product_id: str, new_stock: int):
-        """Queue a stock push for a product. Called after any stock change."""
-        self.set_setting(f"stock_push_{product_id}", str(new_stock))
-        logger.info(f"Queued stock push for product {product_id} → {new_stock}")
-
-    def get_stock_push_queue(self):
-        """Return list of {product_id, stock} for all queued stock pushes."""
-        try:
-            rows = self._rest("GET", "settings", params={
-                "key": "like.stock_push_%",
-                "select": "key,value",
-            })
-            result = []
-            for r in rows:
-                product_id = r["key"][len("stock_push_"):]
-                try:
-                    result.append({"product_id": product_id, "stock": int(r["value"])})
-                except (ValueError, TypeError):
-                    pass
-            return result
-        except Exception as e:
-            logger.warning(f"get_stock_push_queue failed: {e}")
-            return []
-
-    def clear_stock_push(self, product_id: str):
-        """Remove a product from the stock push queue after successful push."""
-        try:
-            r = requests.delete(
-                f"{self.url}/rest/v1/settings",
-                headers={k: v for k, v in self.headers.items() if k != "Prefer"},
-                params={"key": f"eq.stock_push_{product_id}"},
-                timeout=30,
-            )
-            r.raise_for_status()
-        except Exception as e:
-            logger.warning(f"clear_stock_push failed for {product_id}: {e}")
-
-    # ─── Products ────────────────────────────────────────────────────────────
-
-    def get_products(self):
-        return self._rest("GET", "products", params={"select": "*", "order": "name.asc"})
-
-    def upsert_product(self, product: dict):
-        sku = product.get("sku")
-        if sku:
-            existing = self._rest("GET", "products", params={"sku": f"eq.{sku}", "select": "id"})
-            if existing:
-                rec_id = existing[0]["id"]
-                r = requests.patch(
-                    f"{self.url}/rest/v1/products",
-                    headers={**self.headers, "Prefer": "return=representation"},
-                    params={"id": f"eq.{rec_id}"},
-                    json=product,
-                    timeout=30,
-                )
-                r.raise_for_status()
-                return r.json() if r.text else []
-        try:
-            return self._rest("POST", "products", payload=product,
-                              headers_extra={"Prefer": "return=representation"})
-        except Exception as e:
-            if "409" in str(e) or "23505" in str(e) or "conflict" in str(e).lower():
-                # Duplicate SKU — fetch and return the existing row
-                logger.warning(f"Duplicate SKU insert ignored for {sku}, returning existing row")
-                rows = self._rest("GET", "products", params={"sku": f"eq.{sku}", "select": "*"})
-                return rows if rows else []
-            raise
-
-    def get_product_by_sku(self, sku: str):
-        rows = self._rest("GET", "products", params={"sku": f"eq.{sku}", "select": "*"})
-        return rows[0] if rows else None
-
-    def get_all_ebay_products(self):
-        """Return all eBay products via platform_pricing table."""
-        rows = self._rest("GET", "platform_pricing", params={"platform": "eq.ebay", "select": "product_id"})
-        if not isinstance(rows, list):
-            return []
-        product_ids = [r["product_id"] for r in rows]
-        if not product_ids:
-            return []
-        id_filter = "in.(" + ",".join(product_ids) + ")"
-        products = self._rest("GET", "products", params={"id": id_filter, "select": "id,sku,name", "limit": "2000"})
-        return products if isinstance(products, list) else []
-
-
-    def update_product_name(self, product_id: str, name: str):
-        r = requests.patch(
-            f"{self.url}/rest/v1/products",
-            headers=self.headers,
-            params={"id": f"eq.{product_id}"},
-            json={"name": name, "updated_at": datetime.now(timezone.utc).isoformat()},
+    def count_products(self):
+        rows = self._rest("GET", "variants", params={"select": "id", "limit": "1"})
+        # Use count header via HEAD request for accuracy
+        r = requests.head(
+            f"{self.url}/rest/v1/variants",
+            headers={**self.headers, "Prefer": "count=exact"},
             timeout=30,
         )
-        r.raise_for_status()
+        cr = r.headers.get("content-range", "")
+        if "/" in cr:
+            try:
+                return int(cr.split("/")[1])
+            except (ValueError, IndexError):
+                pass
+        return len(rows)
 
-    def delete_product(self, product_id: str):
-        """Delete a product and its related pricing/inventory rows."""
-        # Delete platform_pricing rows first
-        requests.delete(f"{self.url}/rest/v1/platform_pricing", headers=self.headers,
-                        params={"product_id": f"eq.{product_id}"}, timeout=30)
-        # Delete inventory rows
-        requests.delete(f"{self.url}/rest/v1/inventory", headers=self.headers,
-                        params={"product_id": f"eq.{product_id}"}, timeout=30)
-        # Delete the product
-        r = requests.delete(f"{self.url}/rest/v1/products", headers=self.headers,
-                            params={"id": f"eq.{product_id}"}, timeout=30)
-        r.raise_for_status()
+    # ─── Products ────────────────────────────────────────────────────────────
+    # In v2, "product" = a variants row joined with its products row.
+    # Returning a unified dict keeps sync_engine.py changes minimal.
 
-    # ─── Platform Pricing Lookups ────────────────────────────────────────────
-
-    def get_platform_pricing_for_product(self, product_id: str, platform: str = None):
-        params = {"select": "*", "product_id": f"eq.{product_id}"}
-        if platform:
-            params["platform"] = f"eq.{platform}"
-        return self._rest("GET", "platform_pricing", params=params)
-
-    def get_product_by_platform_id(self, platform: str, platform_product_id: str):
-        rows = self._rest("GET", "platform_pricing",
-                          params={"platform": f"eq.{platform}",
-                                  "platform_product_id": f"eq.{platform_product_id}",
-                                  "select": "product_id"})
+    def get_product_by_sku(self, sku: str):
+        """Return a unified product+variant dict keyed by variant id.
+        Returns None if not found."""
+        rows = self._rest("GET", "variants",
+                          params={"internal_sku": f"eq.{sku}", "select": "*", "limit": "1"})
         if not rows:
             return None
-        product_id = rows[0]["product_id"]
-        prod_rows = self._rest("GET", "products", params={"id": f"eq.{product_id}", "select": "*"})
-        return prod_rows[0] if prod_rows else None
-
-    def get_platform_pricing_by_variant_id(self, platform: str, variant_id: str):
-        """Return product_id if this platform variant_id is already linked to any product.
-        Used to detect merged products where SS SKU wasn't added to merged_skus blocklist."""
-        if not variant_id:
+        v = rows[0]
+        # Fetch the parent product for name/description
+        prod_rows = self._rest("GET", "products",
+                               params={"id": f"eq.{v['product_id']}", "select": "*", "limit": "1"})
+        if not prod_rows:
             return None
-        rows = self._rest("GET", "platform_pricing", params={
-            "platform": f"eq.{platform}",
-            "platform_variant_id": f"eq.{variant_id}",
-            "select": "product_id",
+        p = prod_rows[0]
+        return {**p, "id": v["id"], "product_id": v["product_id"],
+                "sku": v["internal_sku"], "needs_sync": v.get("needs_sync", False),
+                "last_synced_at": v.get("last_synced_at")}
+
+    def get_product_by_id(self, variant_id: str):
+        """Return unified dict for a given variant id."""
+        rows = self._rest("GET", "variants",
+                          params={"id": f"eq.{variant_id}", "select": "*", "limit": "1"})
+        if not rows:
+            return None
+        v = rows[0]
+        prod_rows = self._rest("GET", "products",
+                               params={"id": f"eq.{v['product_id']}", "select": "*", "limit": "1"})
+        if not prod_rows:
+            return None
+        p = prod_rows[0]
+        return {**p, "id": v["id"], "product_id": v["product_id"],
+                "sku": v["internal_sku"], "needs_sync": v.get("needs_sync", False)}
+
+    def upsert_product(self, product: dict):
+        """Create or update a product+variant pair.
+        product dict: {name, sku, description}
+        Returns a list with one unified dict (id = variant_id).
+        """
+        sku = product.get("sku")
+        name = product.get("name", "")
+
+        # Check if variant with this SKU already exists
+        if sku:
+            existing_variant = self._rest("GET", "variants",
+                                          params={"internal_sku": f"eq.{sku}", "select": "*"})
+            if existing_variant:
+                v = existing_variant[0]
+                # Update product name if changed
+                self._patch("products", {"id": f"eq.{v['product_id']}"},
+                            {"name": name, "updated_at": datetime.now(timezone.utc).isoformat()})
+                return [self.get_product_by_sku(sku)]
+
+        # Create new product row
+        now = datetime.now(timezone.utc).isoformat()
+        prod_payload = {
+            "name": name,
+            "sku": sku,  # kept for legacy compat
+            "description": product.get("description", ""),
+            "status": "active",
+            "active": True,
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            prod_rows = self._rest("POST", "products", payload=prod_payload,
+                                   headers_extra={"Prefer": "return=representation"})
+        except Exception as e:
+            if "409" in str(e) or "23505" in str(e) or "conflict" in str(e).lower():
+                # Race condition — SKU already inserted, return existing
+                if sku:
+                    logger.warning(f"Duplicate product sku {sku}, returning existing")
+                    return [self.get_product_by_sku(sku)]
+            raise
+
+        if not prod_rows:
+            return []
+        prod = prod_rows[0]
+        product_id = prod["id"]
+
+        # Create variant row
+        var_payload = {
+            "product_id": product_id,
+            "internal_sku": sku,
+            "needs_sync": False,
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            var_rows = self._rest("POST", "variants", payload=var_payload,
+                                  headers_extra={"Prefer": "return=representation"})
+        except Exception as e:
+            if "409" in str(e) or "23505" in str(e):
+                # Variant race condition
+                if sku:
+                    return [self.get_product_by_sku(sku)]
+            raise
+
+        if not var_rows:
+            return []
+        v = var_rows[0]
+        return [{**prod, "id": v["id"], "product_id": product_id,
+                 "sku": v["internal_sku"], "needs_sync": False}]
+
+    def update_product_name(self, variant_id: str, name: str):
+        """Update name on the parent product via variant_id."""
+        rows = self._rest("GET", "variants",
+                          params={"id": f"eq.{variant_id}", "select": "product_id"})
+        if rows:
+            self._patch("products", {"id": f"eq.{rows[0]['product_id']}"},
+                        {"name": name, "updated_at": datetime.now(timezone.utc).isoformat()})
+
+    def delete_product(self, variant_id: str):
+        """Delete a variant and (if it was the last variant) its parent product."""
+        rows = self._rest("GET", "variants",
+                          params={"id": f"eq.{variant_id}", "select": "product_id"})
+        if not rows:
+            return
+        product_id = rows[0]["product_id"]
+
+        # Delete channel_listings (cascades via FK, but explicit for clarity)
+        self._delete("channel_listings", {"variant_id": f"eq.{variant_id}"})
+        # Delete inventory
+        self._delete("inventory", {"variant_id": f"eq.{variant_id}"})
+        # Delete variant
+        self._delete("variants", {"id": f"eq.{variant_id}"})
+
+        # Delete parent product if no variants remain
+        remaining = self._rest("GET", "variants",
+                               params={"product_id": f"eq.{product_id}", "select": "id"})
+        if not remaining:
+            self._delete("orders", {"product_id": f"eq.{product_id}"})
+            self._delete("sales_trends", {"product_id": f"eq.{product_id}"})
+            self._delete("products", {"id": f"eq.{product_id}"})
+
+    # ─── eBay helper ─────────────────────────────────────────────────────────
+
+    def get_all_ebay_products(self):
+        """Return list of {id (variant_id), sku, name} for all eBay-listed variants."""
+        rows = self._rest("GET", "channel_listings",
+                          params={"channel": "eq.ebay", "select": "variant_id", "limit": "5000"})
+        variant_ids = list({r["variant_id"] for r in rows if r.get("variant_id")})
+        if not variant_ids:
+            return []
+        id_filter = "in.(" + ",".join(variant_ids) + ")"
+        variants = self._rest("GET", "variants",
+                              params={"id": id_filter, "select": "id,internal_sku,product_id", "limit": "5000"})
+        result = []
+        for v in variants:
+            result.append({"id": v["id"], "sku": v["internal_sku"], "product_id": v["product_id"]})
+        return result
+
+    # ─── Channel Listings (replaces platform_pricing) ────────────────────────
+
+    def get_channel_listings_for_variant(self, variant_id: str, channel: str = None):
+        params = {"variant_id": f"eq.{variant_id}", "select": "*"}
+        if channel:
+            params["channel"] = f"eq.{channel}"
+        return self._rest("GET", "channel_listings", params=params)
+
+    def get_channel_listing_by_channel_variant_id(self, channel: str, channel_variant_id: str):
+        """Check if a platform variant_id is already linked to any variant."""
+        if not channel_variant_id:
+            return None
+        rows = self._rest("GET", "channel_listings", params={
+            "channel": f"eq.{channel}",
+            "channel_variant_id": f"eq.{channel_variant_id}",
+            "select": "variant_id",
+            "limit": "1",
         })
-        return rows[0]["product_id"] if rows else None
+        return rows[0]["variant_id"] if rows else None
 
-    # ─── Inventory ───────────────────────────────────────────────────────────
+    def get_variant_by_channel_item_id(self, channel: str, channel_product_id: str):
+        """Find a variant by eBay item id or SS product id."""
+        # Extract bare item id if in format "v1|XXXXX|0"
+        bare_id = channel_product_id.split("|")[1] if "|" in channel_product_id else channel_product_id
+        # Try exact match first
+        rows = self._rest("GET", "channel_listings", params={
+            "channel": f"eq.{channel}",
+            "channel_product_id": f"like.*{bare_id}*",
+            "select": "variant_id",
+            "limit": "1",
+        })
+        if rows:
+            return self.get_product_by_id(rows[0]["variant_id"])
+        return None
 
-    def get_inventory(self, product_id: str = None):
-        params = {"select": "*"}
-        if product_id:
-            params["product_id"] = f"eq.{product_id}"
-        return self._rest("GET", "inventory", params=params)
+    def upsert_channel_listing(self, listing: dict):
+        """Upsert a channel listing.
+        listing dict: {variant_id, channel, channel_sku, channel_price,
+                       channel_product_id, channel_variant_id}
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        listing["updated_at"] = now
+        if "last_synced_at" not in listing:
+            listing["last_synced_at"] = now
 
-    def upsert_inventory(self, inv: dict):
-        inv["updated_at"] = datetime.now(timezone.utc).isoformat()
-        product_id = inv.get("product_id")
-        if product_id:
-            # Check if inventory record already exists for this product
-            existing = self._rest("GET", "inventory", params={"product_id": f"eq.{product_id}", "select": "id"})
-            if existing:
-                # UPDATE existing record via PATCH
-                inv_id = existing[0]["id"]
-                r = requests.patch(
-                    f"{self.url}/rest/v1/inventory",
-                    headers={**self.headers, "Prefer": "return=representation"},
-                    params={"id": f"eq.{inv_id}"},
-                    json=inv,
-                    timeout=30,
-                )
-                r.raise_for_status()
-                return r.json() if r.text else []
-        # INSERT new record
-        return self._rest("POST", "inventory", payload=inv,
-                          headers_extra={"Prefer": "return=representation"})
-
-    # ─── Platform Pricing ────────────────────────────────────────────────────
-
-    def get_prices(self, product_id: str = None):
-        params = {"select": "*"}
-        if product_id:
-            params["product_id"] = f"eq.{product_id}"
-        return self._rest("GET", "platform_pricing", params=params)
-
-    def upsert_price(self, price_row: dict):
-        now_iso = datetime.now(timezone.utc).isoformat()
-        price_row["updated_at"] = now_iso
-        # Mark as already synced so catalogue-sourced prices don't re-queue as pending changes
-        if "last_synced_at" not in price_row:
-            price_row["last_synced_at"] = now_iso
-        product_id = price_row.get("product_id")
-        platform   = price_row.get("platform")
-        if product_id and platform:
-            existing = self._rest("GET", "platform_pricing", params={
-                "product_id": f"eq.{product_id}",
-                "platform": f"eq.{platform}",
-                "select": "id"
+        variant_id = listing.get("variant_id")
+        channel = listing.get("channel")
+        if variant_id and channel:
+            existing = self._rest("GET", "channel_listings", params={
+                "variant_id": f"eq.{variant_id}",
+                "channel": f"eq.{channel}",
+                "select": "id",
             })
             if existing:
                 rec_id = existing[0]["id"]
-                # Don't overwrite platform_variant_id with null if it's already set
-                # (preserves backfilled variation specifics from Trading API)
-                patch_row = dict(price_row)
-                if patch_row.get("platform_variant_id") is None:
-                    patch_row.pop("platform_variant_id", None)
-                r = requests.patch(
-                    f"{self.url}/rest/v1/platform_pricing",
-                    headers={**self.headers, "Prefer": "return=representation"},
-                    params={"id": f"eq.{rec_id}"},
-                    json=patch_row,
-                    timeout=30,
-                )
-                r.raise_for_status()
-                return r.json() if r.text else []
-        return self._rest("POST", "platform_pricing", payload=price_row,
+                patch = dict(listing)
+                # Don't overwrite channel_variant_id with null if already set
+                if patch.get("channel_variant_id") is None:
+                    patch.pop("channel_variant_id", None)
+                return self._patch("channel_listings", {"id": f"eq.{rec_id}"}, patch)
+        return self._rest("POST", "channel_listings", payload=listing,
                           headers_extra={"Prefer": "return=representation"})
 
     def get_pending_price_changes(self):
-        rows = self._rest("GET", "platform_pricing", params={"select": "*"})
+        """Return channel_listings where updated_at > last_synced_at (price was changed)."""
+        rows = self._rest("GET", "channel_listings",
+                          params={"select": "*", "limit": "5000"})
         pending = []
         for r in rows:
             last_synced = r.get("last_synced_at")
@@ -270,15 +327,163 @@ class Database:
                 pending.append(r)
         return pending
 
-    def mark_price_synced(self, price_id: str):
-        r = requests.patch(
-            f"{self.url}/rest/v1/platform_pricing",
-            headers=self.headers,
-            params={"id": f"eq.{price_id}"},
-            json={"last_synced_at": datetime.now(timezone.utc).isoformat()},
-            timeout=30,
-        )
-        r.raise_for_status()
+    def mark_price_synced(self, listing_id: str):
+        self._patch("channel_listings", {"id": f"eq.{listing_id}"},
+                    {"last_synced_at": datetime.now(timezone.utc).isoformat()})
+
+    # ─── needs_sync flag (replaces stock_push_* settings queue) ──────────────
+
+    def mark_variant_needs_sync(self, variant_id: str):
+        """Mark a variant as needing stock+price push on next sync run."""
+        self._patch("variants", {"id": f"eq.{variant_id}"},
+                    {"needs_sync": True, "updated_at": datetime.now(timezone.utc).isoformat()})
+        logger.info(f"Marked variant {variant_id} needs_sync=TRUE")
+
+    def get_variants_needing_sync(self):
+        """Return all channel_listings for variants where needs_sync=TRUE.
+        Returns list of {variant_id, channel_listings, stock}.
+        """
+        # Get variants that need sync
+        variants = self._rest("GET", "variants", params={
+            "needs_sync": "eq.true",
+            "select": "id,internal_sku,product_id",
+            "limit": "5000",
+        })
+        if not variants:
+            return []
+
+        result = []
+        for v in variants:
+            variant_id = v["id"]
+            # Get current stock
+            inv_rows = self.get_inventory(variant_id=variant_id)
+            stock = inv_rows[0]["total_stock"] if inv_rows else 0
+            # Get channel listings for this variant
+            listings = self.get_channel_listings_for_variant(variant_id)
+            result.append({
+                "variant_id": variant_id,
+                "sku": v["internal_sku"],
+                "product_id": v["product_id"],
+                "stock": stock,
+                "listings": listings,
+            })
+        return result
+
+    def clear_variant_sync_flag(self, variant_id: str):
+        """Mark a variant as synced."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._patch("variants", {"id": f"eq.{variant_id}"},
+                    {"needs_sync": False, "last_synced_at": now, "updated_at": now})
+
+    # ─── Legacy queue compatibility (for any callers still using old API) ─────
+    # These shim methods forward to the new needs_sync approach.
+
+    def queue_stock_push(self, variant_id: str, new_stock: int):
+        """Legacy shim: mark variant needs_sync=TRUE instead of writing to settings."""
+        self.mark_variant_needs_sync(variant_id)
+
+    def get_stock_push_queue(self):
+        """Legacy shim: return variants needing sync as queue-style list."""
+        return [{"product_id": v["variant_id"], "stock": v["stock"]}
+                for v in self.get_variants_needing_sync()]
+
+    def clear_stock_push(self, variant_id: str):
+        """Legacy shim: clear needs_sync flag."""
+        self.clear_variant_sync_flag(variant_id)
+
+    # ─── Inventory ───────────────────────────────────────────────────────────
+
+    def get_inventory(self, product_id: str = None, variant_id: str = None):
+        params = {"select": "*"}
+        if variant_id:
+            params["variant_id"] = f"eq.{variant_id}"
+        elif product_id:
+            # Try variant_id first (in case product_id is actually a variant_id)
+            # This handles legacy callers that pass variant_id as product_id
+            params["variant_id"] = f"eq.{product_id}"
+            rows = self._rest("GET", "inventory", params=params)
+            if rows:
+                return rows
+            # Fall back to product_id FK
+            params = {"select": "*", "product_id": f"eq.{product_id}"}
+        return self._rest("GET", "inventory", params=params)
+
+    def upsert_inventory(self, inv: dict):
+        inv["updated_at"] = datetime.now(timezone.utc).isoformat()
+        variant_id = inv.get("variant_id") or inv.get("product_id")  # accept either key
+        if variant_id:
+            existing = self._rest("GET", "inventory",
+                                  params={"variant_id": f"eq.{variant_id}", "select": "id"})
+            if not existing:
+                # Also try product_id for very old rows
+                existing = self._rest("GET", "inventory",
+                                      params={"product_id": f"eq.{variant_id}", "select": "id"})
+            if existing:
+                inv_id = existing[0]["id"]
+                return self._patch("inventory", {"id": f"eq.{inv_id}"}, inv)
+        return self._rest("POST", "inventory", payload=inv,
+                          headers_extra={"Prefer": "return=representation"})
+
+    # ─── Legacy platform_pricing shims ───────────────────────────────────────
+    # The sync engine still calls upsert_price / get_platform_pricing_for_product
+    # These shim to channel_listings using variant_id.
+
+    def upsert_price(self, price_row: dict):
+        """Shim: maps platform_pricing-style dict to channel_listings upsert."""
+        variant_id = price_row.get("product_id")  # product_id was actually variant_id post-migration
+        if not variant_id:
+            logger.warning("upsert_price called with no product_id/variant_id — skipping")
+            return []
+
+        listing = {
+            "variant_id": variant_id,
+            "channel": price_row.get("platform"),
+            "channel_sku": None,  # will be preserved from existing row if set
+            "channel_price": price_row.get("price"),
+            "channel_product_id": price_row.get("platform_product_id"),
+            "channel_variant_id": price_row.get("platform_variant_id"),
+        }
+        # Preserve last_synced_at if supplied (catalogue imports pass it)
+        if "last_synced_at" in price_row:
+            listing["last_synced_at"] = price_row["last_synced_at"]
+        return self.upsert_channel_listing(listing)
+
+    def get_platform_pricing_for_product(self, variant_id: str, platform: str = None):
+        """Shim: returns channel_listings for a variant, in platform_pricing-style dicts."""
+        listings = self.get_channel_listings_for_variant(variant_id, channel=platform)
+        # Map back to expected keys
+        result = []
+        for cl in listings:
+            result.append({
+                "id": cl["id"],
+                "product_id": variant_id,
+                "platform": cl["channel"],
+                "price": cl["channel_price"],
+                "currency": "GBP",
+                "platform_product_id": cl["channel_product_id"],
+                "platform_variant_id": cl["channel_variant_id"],
+                "last_synced_at": cl.get("last_synced_at"),
+                "updated_at": cl.get("updated_at"),
+            })
+        return result
+
+    def get_platform_pricing_by_variant_id(self, platform: str, variant_id: str):
+        """Shim: check if a channel_variant_id is already linked."""
+        return self.get_channel_listing_by_channel_variant_id(platform, variant_id)
+
+    def get_product_by_platform_id(self, platform: str, platform_product_id: str):
+        """Find a variant by its platform item/product id."""
+        return self.get_variant_by_channel_item_id(platform, platform_product_id)
+
+    def get_prices(self, product_id: str = None):
+        """Return channel_listings as pricing-style dicts."""
+        if product_id:
+            return self.get_platform_pricing_for_product(product_id)
+        rows = self._rest("GET", "channel_listings", params={"select": "*", "limit": "5000"})
+        return rows
+
+    def mark_price_synced_legacy(self, price_id: str):
+        self.mark_price_synced(price_id)
 
     # ─── Orders ──────────────────────────────────────────────────────────────
 
@@ -293,14 +498,8 @@ class Database:
         return self._rest("POST", "orders", payload=order)
 
     def update_order_status(self, platform_order_id: str, status: str):
-        r = requests.patch(
-            f"{self.url}/rest/v1/orders",
-            headers=self.headers,
-            params={"platform_order_id": f"eq.{platform_order_id}"},
-            json={"fulfillment_status": status, "status": status},
-            timeout=30,
-        )
-        r.raise_for_status()
+        self._patch("orders", {"platform_order_id": f"eq.{platform_order_id}"},
+                    {"fulfillment_status": status, "status": status})
 
     def get_orders(self, platform: str = None, limit: int = 200):
         params = {"select": "*", "order": "ordered_at.desc", "limit": str(limit)}
@@ -312,38 +511,28 @@ class Database:
         rows = self._rest("GET", "orders", params={"id": f"eq.{order_id}", "select": "*"})
         return rows[0] if rows else None
 
-    def update_order_tracking(self, order_id: str, tracking_number: str, carrier: str, status: str = "SHIPPED"):
-        r = requests.patch(
-            f"{self.url}/rest/v1/orders",
-            headers=self.headers,
-            params={"id": f"eq.{order_id}"},
-            json={"tracking_number": tracking_number, "tracking_carrier": carrier, "fulfillment_status": status},
-            timeout=30,
-        )
-        r.raise_for_status()
+    def update_order_tracking(self, order_id: str, tracking_number: str, carrier: str,
+                              status: str = "SHIPPED"):
+        self._patch("orders", {"id": f"eq.{order_id}"},
+                    {"tracking_number": tracking_number,
+                     "tracking_carrier": carrier,
+                     "fulfillment_status": status})
 
     def get_orders_needing_tracking_push(self):
         try:
-            params = {
+            return self._rest("GET", "orders", params={
                 "select": "*",
                 "tracking_number": "not.is.null",
                 "fulfillment_status": "eq.SHIPPED",
-            }
-            return self._rest("GET", "orders", params=params)
+            })
         except Exception as e:
             logger.warning(f"get_orders_needing_tracking_push failed: {e}")
             return []
 
     def mark_tracking_pushed(self, order_id: str):
         try:
-            r = requests.patch(
-                f"{self.url}/rest/v1/orders",
-                headers=self.headers,
-                params={"id": f"eq.{order_id}"},
-                json={"fulfillment_status": "TRACKING_PUSHED", "status": "TRACKING_PUSHED"},
-                timeout=30,
-            )
-            r.raise_for_status()
+            self._patch("orders", {"id": f"eq.{order_id}"},
+                        {"fulfillment_status": "TRACKING_PUSHED", "status": "TRACKING_PUSHED"})
         except Exception as e:
             logger.warning(f"mark_tracking_pushed failed for {order_id}: {e}")
 
@@ -360,12 +549,8 @@ class Database:
                 params["product_id"] = f"eq.{snap['product_id']}"
             else:
                 params["product_id"] = "is.null"
-            requests.delete(
-                f"{self.url}/rest/v1/sales_trends",
-                headers=self.headers,
-                params=params,
-                timeout=30,
-            )
+            requests.delete(f"{self.url}/rest/v1/sales_trends",
+                            headers=self.headers, params=params, timeout=30)
         except Exception as e:
             logger.warning(f"Snapshot pre-delete failed (non-fatal): {e}")
         return self._rest("POST", "sales_trends", payload=snap)
@@ -388,15 +573,10 @@ class Database:
 
     def finish_sync_log(self, log_id: str, status: str, items: int = 0, errors: str = None):
         details = json.dumps({"items_synced": items}) if items else None
-        r = requests.patch(
-            f"{self.url}/rest/v1/sync_log",
-            headers=self.headers,
-            params={"id": f"eq.{log_id}"},
-            json={"status": status, "details": details,
-                  "error_message": errors, "completed_at": datetime.now(timezone.utc).isoformat()},
-            timeout=30,
-        )
-        r.raise_for_status()
+        self._patch("sync_log", {"id": f"eq.{log_id}"},
+                    {"status": status, "details": details,
+                     "error_message": errors,
+                     "completed_at": datetime.now(timezone.utc).isoformat()})
 
     def get_sync_logs(self, limit: int = 20):
         return self._rest("GET", "sync_log",
@@ -413,5 +593,3 @@ class Database:
 
     def clear_sync_request(self):
         self.set_setting("manual_sync_requested", "false")
-
-
