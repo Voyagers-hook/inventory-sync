@@ -1,12 +1,18 @@
 """
-Core sync logic.
+Core sync logic — v2
 
 HOW SYNC WORKS:
-- Hourly sync: INCREMENTAL only — check for new listings since last run,
+- Hourly sync: INCREMENTAL — check for new listings since last run,
   process orders, push queued stock/price changes. Completes in seconds.
 - Sync Now (manual): Full catalogue refresh + orders + queues.
   This is the only time ALL listings are re-fetched.
-- Stock rule: NEVER overwrite existing stock. Only set stock for brand new products.
+
+SYNC FLAG (new in v2):
+- Editing stock or prices on the dashboard sets variants.needs_sync = TRUE.
+- Hourly job: find needs_sync=TRUE → push stock AND price to both platforms → set needs_sync=FALSE.
+- No more stock_push_* settings rows.
+
+STOCK RULE: NEVER overwrite existing stock. Only set stock for brand new products.
 """
 import logging
 import threading
@@ -18,14 +24,14 @@ logger = logging.getLogger(__name__)
 
 class SyncEngine:
     def __init__(self, db, ss, ebay):
-        self.db   = db
-        self.ss   = ss
+        self.db = db
+        self.ss = ss
         self.ebay = ebay
 
     # ─── Helpers ────────────────────────────────────────────────────────────
 
     def _load_blocklists(self):
-        """Load merged_skus blocklist and existing eBay item IDs from platform_pricing."""
+        """Load merged_skus blocklist and existing eBay item IDs from channel_listings."""
         import json
         merged_skus_raw = self.db.get_setting("merged_skus")
         merged_skus = set()
@@ -36,11 +42,14 @@ class SyncEngine:
             except Exception:
                 pass
 
+        # Use channel_listings (not legacy platform_pricing)
         existing_ebay_item_ids = set()
-        all_ebay_pricing = self.db._rest("GET", "platform_pricing",
-            params={"platform": "eq.ebay", "select": "platform_product_id", "limit": "5000"})
-        for ep in (all_ebay_pricing or []):
-            pid = ep.get("platform_product_id", "")
+        all_ebay_listings = self.db._rest("GET", "channel_listings",
+                                          params={"channel": "eq.ebay",
+                                                  "select": "channel_product_id",
+                                                  "limit": "5000"})
+        for ep in (all_ebay_listings or []):
+            pid = ep.get("channel_product_id", "")
             parts = pid.split("|")
             if len(parts) >= 2:
                 existing_ebay_item_ids.add(parts[1])
@@ -58,7 +67,7 @@ class SyncEngine:
 
         # Skip if already linked to another product (merged) and no product exists for this SKU
         if bare_id in existing_ebay_item_ids and not self.db.get_product_by_sku(sku):
-            logger.info(f"Skipping eBay item {sku} - already linked via platform_pricing (merged)")
+            logger.info(f"Skipping eBay item {sku} - already linked via channel_listings (merged)")
             return 0
 
         if sku in merged_skus:
@@ -87,19 +96,20 @@ class SyncEngine:
                 self.db.update_product_name(existing["id"], name)
 
         if existing:
-            product_id = existing["id"]
+            product_id = existing["id"]  # this is variant_id in v2
             if is_new:
-                self.db.upsert_inventory({"product_id": product_id, "total_stock": item.get("quantity", 0)})
+                self.db.upsert_inventory({"variant_id": product_id,
+                                          "product_id": existing.get("product_id"),
+                                          "total_stock": item.get("quantity", 0)})
             variation_sku = item.get("variation_sku") if item.get("is_variant") else None
             self.db.upsert_price({
-                "product_id": product_id,
+                "product_id": product_id,   # shim translates to variant_id
                 "platform": "ebay",
                 "price": float(item.get("price", 0.0)),
                 "currency": "GBP",
                 "platform_product_id": item.get("item_id", sku),
                 "platform_variant_id": variation_sku,
             })
-            # Track this item ID so future iterations know it's been processed
             existing_ebay_item_ids.add(bare_id)
 
         return 1 if is_new else 0
@@ -120,12 +130,12 @@ class SyncEngine:
             ss_products = []
         else:
             ss_products = self.ss.get_products()
-        ss_inventory_raw = self.ss.get_inventory()
-        ss_stock_map = {}
-        for inv_item in ss_inventory_raw:
-            vid = inv_item.get("variantId")
-            if vid:
-                ss_stock_map[vid] = inv_item.get("quantity", 0)
+            ss_inventory_raw = self.ss.get_inventory()
+            ss_stock_map = {}
+            for inv_item in ss_inventory_raw:
+                vid = inv_item.get("variantId")
+                if vid:
+                    ss_stock_map[vid] = inv_item.get("quantity", 0)
 
         for prod in ss_products:
             prod_name = prod.get("name", "Unnamed")
@@ -141,8 +151,8 @@ class SyncEngine:
                 if sku in merged_skus:
                     continue
                 # Check if this SS variant is already linked to a merged product
-                # (catches cases where SS SKU wasn't added to merged_skus blocklist)
-                if self.db.get_platform_pricing_by_variant_id("squarespace", variant.get("id")):
+                # via channel_listings channel_variant_id
+                if self.db.get_channel_listing_by_channel_variant_id("squarespace", variant.get("id")):
                     continue
                 existing = self.db.get_product_by_sku(sku)
                 is_new_product = existing is None
@@ -157,10 +167,12 @@ class SyncEngine:
                 elif existing.get("name") == prod_name and name != prod_name:
                     self.db.update_product_name(existing["id"], name)
                 if existing:
-                    product_id = existing["id"]
+                    product_id = existing["id"]  # variant_id in v2
                     stock_qty = ss_stock_map.get(variant["id"], 0)
                     if is_new_product:
-                        self.db.upsert_inventory({"product_id": product_id, "total_stock": stock_qty})
+                        self.db.upsert_inventory({"variant_id": product_id,
+                                                  "product_id": existing.get("product_id"),
+                                                  "total_stock": stock_qty})
                     price_val = variant.get("pricing", {}).get("basePrice", {}).get("value", "0")
                     self.db.upsert_price({
                         "product_id": product_id,
@@ -224,7 +236,7 @@ class SyncEngine:
     # ─── Order Processing ────────────────────────────────────────────────────
 
     def process_squarespace_orders(self, since: str = None):
-        """Process new SS orders → deduct stock → queue push to eBay."""
+        """Process new SS orders → deduct stock → mark variant needs_sync=TRUE."""
         logger.info(f"Processing SS orders since {since}")
         orders = self.ss.get_orders(modified_after=since)
         processed = 0
@@ -248,10 +260,10 @@ class SyncEngine:
             order_saved = False
             for line in order.get("lineItems", []):
                 variant_id = line.get("variantId")
-                qty_sold   = int(line.get("quantity", 1))
-                sku        = line.get("sku") or f"SS-{line.get('productId')}-{variant_id}"
-                price      = float(line.get("unitPricePaid", {}).get("value", 0))
-                product    = self.db.get_product_by_sku(sku)
+                qty_sold = int(line.get("quantity", 1))
+                sku = line.get("sku") or f"SS-{line.get('productId')}-{variant_id}"
+                price = float(line.get("unitPricePaid", {}).get("value", 0))
+                product = self.db.get_product_by_sku(sku)
                 if not product:
                     logger.warning(f"SS SKU {sku} not in DB — saving order without product link")
 
@@ -259,7 +271,7 @@ class SyncEngine:
                     self.db.insert_order({
                         "platform": "squarespace",
                         "platform_order_id": order_id,
-                        "product_id": product["id"] if product else None,
+                        "product_id": product["product_id"] if product else None,
                         "sku": sku,
                         "quantity": qty_sold,
                         "unit_price": price,
@@ -282,13 +294,20 @@ class SyncEngine:
                     order_saved = True
 
                 if product:
-                    inv_rows = self.db.get_inventory(product["id"])
+                    variant_db_id = product["id"]  # this is variant_id in v2
+                    inv_rows = self.db.get_inventory(variant_id=variant_db_id)
                     if inv_rows:
                         inv = inv_rows[0]
                         new_stock = max(0, inv["total_stock"] - qty_sold)
-                        self.db.upsert_inventory({"id": inv["id"], "product_id": product["id"], "total_stock": new_stock})
-                        self.db.queue_stock_push(product["id"], new_stock)
-                        logger.info(f"SS sale: {sku} qty={qty_sold} → stock now {new_stock} (queued push)")
+                        self.db.upsert_inventory({
+                            "id": inv["id"],
+                            "variant_id": variant_db_id,
+                            "product_id": product.get("product_id"),
+                            "total_stock": new_stock,
+                        })
+                        # Mark needs_sync so hourly job pushes new stock to eBay too
+                        self.db.mark_variant_needs_sync(variant_db_id)
+                        logger.info(f"SS sale: {sku} qty={qty_sold} → stock now {new_stock} (needs_sync=TRUE)")
             processed += 1
         logger.info(f"SS orders processed: {processed}")
         return processed
@@ -327,16 +346,16 @@ class SyncEngine:
 
             order_saved = False
             for line in order.get("lineItems", []):
-                sku            = line.get("sku", "")
+                sku = line.get("sku", "")
                 legacy_item_id = line.get("legacyItemId", "")
-                qty_sold       = int(line.get("quantity", 1))
-                price          = float(line.get("lineItemCost", {}).get("value", 0))
+                qty_sold = int(line.get("quantity", 1))
+                price = float(line.get("lineItemCost", {}).get("value", 0))
 
                 product = self.db.get_product_by_sku(sku) if sku else None
                 if not product and legacy_item_id:
                     product = self.db.get_product_by_platform_id("ebay", legacy_item_id)
                     if product:
-                        logger.info(f"eBay order: resolved item {legacy_item_id} → product {product['id']}")
+                        logger.info(f"eBay order: resolved item {legacy_item_id} → variant {product['id']}")
 
                 if not product:
                     logger.warning(f"eBay SKU '{sku}' / item {legacy_item_id} not in DB")
@@ -345,7 +364,7 @@ class SyncEngine:
                     self.db.insert_order({
                         "platform": "ebay",
                         "platform_order_id": order_id,
-                        "product_id": product["id"] if product else None,
+                        "product_id": product["product_id"] if product else None,
                         "sku": sku,
                         "quantity": qty_sold,
                         "unit_price": price,
@@ -368,89 +387,166 @@ class SyncEngine:
                     order_saved = True
 
                 if product:
-                    inv_rows = self.db.get_inventory(product["id"])
+                    variant_db_id = product["id"]  # variant_id in v2
+                    inv_rows = self.db.get_inventory(variant_id=variant_db_id)
                     if inv_rows:
                         inv = inv_rows[0]
                         new_stock = max(0, inv["total_stock"] - qty_sold)
-                        self.db.upsert_inventory({"id": inv["id"], "product_id": product["id"], "total_stock": new_stock})
-                        self.db.queue_stock_push(product["id"], new_stock)
-                        logger.info(f"eBay sale: {sku} qty={qty_sold} → stock now {new_stock} (queued push)")
+                        self.db.upsert_inventory({
+                            "id": inv["id"],
+                            "variant_id": variant_db_id,
+                            "product_id": product.get("product_id"),
+                            "total_stock": new_stock,
+                        })
+                        # Mark needs_sync so hourly job pushes new stock to SS too
+                        self.db.mark_variant_needs_sync(variant_db_id)
+                        logger.info(f"eBay sale: {sku} qty={qty_sold} → stock now {new_stock} (needs_sync=TRUE)")
 
             processed += 1
 
         logger.info(f"eBay orders processed: {processed} new")
         return processed
 
-    # ─── Price & Stock Push ──────────────────────────────────────────────────
+    # ─── Unified Stock + Price Push (needs_sync=TRUE) ────────────────────────
+
+    def sync_pending_variants(self):
+        """
+        Core sync step — runs hourly.
+
+        1. Find all variants where needs_sync = TRUE
+        2. For each variant: push current stock AND current prices to eBay + Squarespace
+        3. Set needs_sync = FALSE, last_synced_at = NOW()
+
+        This ensures stock and prices are NEVER pushed immediately when edited on the dashboard.
+        Only this hourly job does the actual platform writes.
+        """
+        pending = self.db.get_variants_needing_sync()
+        if not pending:
+            logger.info("Sync queue: empty (no variants with needs_sync=TRUE)")
+            return 0
+
+        logger.info(f"Sync queue: {len(pending)} variant(s) to push")
+
+        pushed = 0
+        for item in pending:
+            variant_id = item["variant_id"]
+            stock = item["stock"]
+            listings = item["listings"]  # channel_listings rows
+
+            ss_variant_updates = []
+            errors = []
+
+            for listing in listings:
+                channel = listing.get("channel")
+                channel_product_id = listing.get("channel_product_id")
+                channel_variant_id = listing.get("channel_variant_id")
+                channel_price = listing.get("channel_price")
+
+                if channel == "ebay":
+                    if channel_product_id:
+                        try:
+                            # Push stock
+                            self.ebay.update_inventory_quantity(
+                                channel_product_id, stock,
+                                listing.get("channel_variant_id")
+                            )
+                            # Push price
+                            if channel_price is not None:
+                                variation_sku = listing.get("channel_variant_id")
+                                self.ebay.update_offer_price(
+                                    channel_product_id, float(channel_price), variation_sku
+                                )
+                            # Mark listing as synced
+                            self.db.mark_price_synced(listing["id"])
+                            pushed += 1
+                        except Exception as e:
+                            errors.append(f"eBay {channel_product_id}: {e}")
+                            logger.error(f"eBay push failed for variant {variant_id}: {e}")
+
+                elif channel == "squarespace":
+                    if channel_variant_id:
+                        ss_variant_updates.append({
+                            "variantId": channel_variant_id,
+                            "quantity": stock,
+                        })
+                        # Push price separately
+                        if channel_product_id and channel_variant_id and channel_price is not None:
+                            try:
+                                self.ss.update_variant_price(
+                                    channel_product_id, channel_variant_id, float(channel_price)
+                                )
+                                self.db.mark_price_synced(listing["id"])
+                                pushed += 1
+                            except Exception as e:
+                                errors.append(f"SS price {channel_variant_id}: {e}")
+                                logger.error(f"SS price push failed for variant {variant_id}: {e}")
+
+            # Batch push SS stock
+            if ss_variant_updates:
+                try:
+                    self.ss.set_variant_stocks(ss_variant_updates)
+                    pushed += len(ss_variant_updates)
+                except Exception as e:
+                    errors.append(f"SS stock batch: {e}")
+                    logger.error(f"SS batch stock push failed for variant {variant_id}: {e}")
+
+            # Mark synced only if no errors (so it retries next hour on error)
+            if not errors:
+                self.db.clear_variant_sync_flag(variant_id)
+                logger.info(f"Variant {variant_id} (sku={item['sku']}): pushed stock={stock}, listings={len(listings)}")
+            else:
+                logger.warning(f"Variant {variant_id} kept needs_sync=TRUE due to errors: {errors}")
+
+        logger.info(f"Sync complete: {pushed} platform update(s) for {len(pending)} variant(s)")
+        return pushed
+
+    # ─── Legacy compatibility wrappers ───────────────────────────────────────
+    # These are called from run_full_sync / run_quick_check.
+    # They now delegate to sync_pending_variants for needs_sync items,
+    # and handle any price-only changes via channel_listings updated_at comparison.
+
+    def sync_pending_stock_changes(self):
+        """Delegate to sync_pending_variants (handles stock + price together)."""
+        return self.sync_pending_variants()
 
     def sync_pending_price_changes(self):
+        """
+        Push price changes that aren't covered by needs_sync.
+        (Safety net: catches any channel_listing updated_at > last_synced_at.)
+        Skips listings for variants already covered by needs_sync (to avoid double-push).
+        """
+        pending_variant_ids = {
+            item["variant_id"] for item in self.db.get_variants_needing_sync()
+        }
         pending = self.db.get_pending_price_changes()
         pushed = 0
         for row in pending:
+            variant_id = row.get("variant_id")
+            # Skip — will be handled by sync_pending_variants
+            if variant_id in pending_variant_ids:
+                continue
             try:
-                if row["platform"] == "squarespace":
-                    pp_id = row.get("platform_product_id")
-                    pv_id = row.get("platform_variant_id")
-                    if pp_id and pv_id:
-                        self.ss.update_variant_price(pp_id, pv_id, float(row["price"]))
-                elif row["platform"] == "ebay":
-                    ebay_item_id = row.get("platform_product_id")
-                    if ebay_item_id:
-                        variation_sku = row.get("platform_variant_id")
-                        self.ebay.update_offer_price(ebay_item_id, float(row["price"]), variation_sku)
+                channel = row.get("channel")
+                channel_product_id = row.get("channel_product_id")
+                channel_variant_id = row.get("channel_variant_id")
+                channel_price = row.get("channel_price")
+
+                if channel == "squarespace":
+                    if channel_product_id and channel_variant_id:
+                        self.ss.update_variant_price(
+                            channel_product_id, channel_variant_id, float(channel_price)
+                        )
+                elif channel == "ebay":
+                    if channel_product_id:
+                        variation_sku = channel_variant_id
+                        self.ebay.update_offer_price(
+                            channel_product_id, float(channel_price), variation_sku
+                        )
                 self.db.mark_price_synced(row["id"])
                 pushed += 1
             except Exception as e:
-                logger.error(f"Price sync failed for product {row['product_id']}: {e}")
-        logger.info(f"Price changes pushed: {pushed}")
-        return pushed
-
-    def sync_pending_stock_changes(self):
-        """Push stock to platforms for ONLY products explicitly in the push queue."""
-        queue = self.db.get_stock_push_queue()
-        if not queue:
-            logger.info("Stock push queue: empty")
-            return 0
-
-        logger.info(f"Stock push queue: {len(queue)} product(s) to push")
-
-        ss_variant_updates = []
-        ebay_updates = []
-
-        for item in queue:
-            product_id = item["product_id"]
-            new_stock  = item["stock"]
-
-            for ep in self.db.get_platform_pricing_for_product(product_id, "ebay"):
-                ebay_item_id = ep.get("platform_product_id")
-                if ebay_item_id:
-                    ebay_updates.append({"item_id": ebay_item_id, "variation_sku": ep.get("platform_variant_id"), "new_qty": new_stock})
-
-            for sp in self.db.get_platform_pricing_for_product(product_id, "squarespace"):
-                variant_id = sp.get("platform_variant_id")
-                if variant_id:
-                    ss_variant_updates.append({"variantId": variant_id, "quantity": new_stock})
-
-        pushed = 0
-
-        for upd in ebay_updates:
-            try:
-                self.ebay.update_inventory_quantity(upd["item_id"], upd["new_qty"], upd.get("variation_sku"))
-                pushed += 1
-            except Exception as e:
-                logger.error(f"eBay stock push failed {upd['item_id']}: {e}")
-
-        if ss_variant_updates:
-            try:
-                adjusted = self.ss.set_variant_stocks(ss_variant_updates)
-                pushed += adjusted
-            except Exception as e:
-                logger.error(f"SS batch stock push failed: {e}")
-
-        for item in queue:
-            self.db.clear_stock_push(item["product_id"])
-
-        logger.info(f"Stock push complete: {pushed} platform update(s) for {len(queue)} product(s)")
+                logger.error(f"Price sync failed for listing {row.get('id')}: {e}")
+        logger.info(f"Price-only changes pushed: {pushed}")
         return pushed
 
     def update_daily_snapshots(self):
@@ -468,7 +564,7 @@ class SyncEngine:
             key = (o["product_id"], o["platform"])
             if key not in tally:
                 tally[key] = {"units": 0, "revenue": 0.0}
-            tally[key]["units"]   += o["quantity"]
+            tally[key]["units"] += o["quantity"]
             tally[key]["revenue"] += float(o.get("unit_price", 0)) * o["quantity"]
         for (product_id, platform), vals in tally.items():
             self.db.upsert_snapshot({
@@ -508,36 +604,37 @@ class SyncEngine:
     # ─── Main Sync Entry Points ──────────────────────────────────────────────
 
     def run_full_sync(self):
-        """Hourly sync: INCREMENTAL — new listings only + orders + queues.
+        """Hourly sync: INCREMENTAL — new listings only + orders + sync queue.
         Fast and safe. Never does full catalogue unless DB is empty.
         """
         total = 0
         product_count = self.db.count_products()
 
         if product_count == 0:
-            # First ever run — do full catalogue import
             logger.info("No products in DB — running initial full catalogue import...")
             total += self.sync_product_catalogue()
-            self.db.set_setting("last_catalogue_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            self.db.set_setting("last_catalogue_sync",
+                                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         else:
-            # Incremental: only check for NEW listings since last sync
             last_cat_sync = self.db.get_setting("last_catalogue_sync")
             if not last_cat_sync:
-                # Fallback: check last 24 hours
                 last_cat_sync = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
             total += self.sync_new_listings(last_cat_sync)
-            self.db.set_setting("last_catalogue_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            self.db.set_setting("last_catalogue_sync",
+                                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
         last = self.db.get_setting("last_full_sync")
-        if last:
-            since = last
-        else:
-            since = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        since = last if last else (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         total += self.process_squarespace_orders(since)
         total += self.process_ebay_orders(since)
-        total += self.sync_pending_stock_changes()
+
+        # Push queued stock + price changes (needs_sync=TRUE variants)
+        total += self.sync_pending_variants()
+
+        # Safety net: any price-only changes not covered by needs_sync
         total += self.sync_pending_price_changes()
+
         total += self.push_pending_tracking()
         self.update_daily_snapshots()
         self.db.set_setting("last_full_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
@@ -550,22 +647,21 @@ class SyncEngine:
         count = 0
 
         count += self.push_pending_tracking()
-        count += self.sync_pending_stock_changes()
+        count += self.sync_pending_variants()
         count += self.sync_pending_price_changes()
 
         if self.db.is_sync_requested():
             logger.info("Sync Now: running full catalogue refresh...")
             self.db.clear_sync_request()
             count += self.sync_product_catalogue()
-            self.db.set_setting("last_catalogue_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            self.db.set_setting("last_catalogue_sync",
+                                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
-            last = self.db.get_setting("last_full_sync")
-            since = last if last else (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            count += self.process_squarespace_orders(since)
-            count += self.process_ebay_orders(since)
-            self.db.set_setting("last_full_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-            self.update_daily_snapshots()
-        else:
-            logger.info("Quick check: no manual sync requested")
+        last = self.db.get_setting("last_full_sync")
+        since = last if last else (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        count += self.process_squarespace_orders(since)
+        count += self.process_ebay_orders(since)
+        self.db.set_setting("last_full_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.update_daily_snapshots()
 
         return count

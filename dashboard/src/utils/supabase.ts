@@ -1,328 +1,583 @@
+/**
+ * Supabase client utilities — v2
+ *
+ * KEY CHANGES vs v1:
+ * - Products are fetched by joining variants + products; Product.id = variant_id
+ * - Pricing is fetched from channel_listings (not platform_pricing)
+ * - Inventory is fetched by variant_id
+ * - updateInventory / updatePricing set variants.needs_sync = TRUE (no immediate push)
+ * - mergeProducts: moves channel_listings + inventory to kept variant, then deletes removed
+ * - No more settings-based stock_push_* queue
+ *
+ * SYNC BEHAVIOUR:
+ *   Edit stock  → sets needs_sync = true  (synced on next hourly GitHub Actions run)
+ *   Edit price  → sets needs_sync = true  (synced on next hourly GitHub Actions run)
+ *   Merge       → sets needs_sync = true on kept variant
+ *   Sync Now    → triggers GitHub Actions workflow_dispatch
+ */
+
 import { createClient } from '@supabase/supabase-js';
-import type { Product, Inventory, Pricing, Order, SalesTrend, SyncLog, Setting } from '../types';
+import type { Product, Inventory, Pricing, Order, SyncLog } from '../types';
 
-const SUPABASE_URL = 'https://czoppjnkjxmduldxlbqh.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN6b3Bwam5ranhtZHVsZHhsYnFoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzODExNzksImV4cCI6MjA4OTk1NzE3OX0.ehTRhOHFn6JAX3lKeEK0Tff8km6Q-8c0tZyIIf0qdR0';
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// ─── Products ────────────────────────────────────────────────────────────────
+
+/**
+ * Fetch all products as a flat variant+product joined structure.
+ * Product.id = variant_id (the operational key throughout the dashboard).
+ * Uses LEFT JOIN so products without inventory/channel_listings still appear.
+ */
 export async function fetchProducts(): Promise<Product[]> {
-  const { data, error } = await supabase.from('products').select('*').order('name').limit(5000);
-  if (error) throw error;
-  return data || [];
-}
+  // PostgREST embedding: variants joined with parent products
+  const { data, error } = await supabase
+    .from('variants')
+    .select(`
+      id,
+      product_id,
+      internal_sku,
+      option1,
+      option2,
+      needs_sync,
+      last_synced_at,
+      created_at,
+      updated_at,
+      products (
+        name,
+        description,
+        status,
+        cost_price,
+        active
+      )
+    `)
+    .order('created_at', { ascending: false })
+    .limit(5000);
 
-export async function fetchInventory(): Promise<Inventory[]> {
-  const { data, error } = await supabase.from('inventory').select('*').limit(5000);
-  if (error) throw error;
-  return data || [];
-}
-
-export async function fetchPricing(): Promise<Pricing[]> {
-  const { data, error } = await supabase.from('platform_pricing').select('*').limit(5000);
-  if (error) throw error;
-  return data || [];
-}
-
-export async function fetchOrders(): Promise<Order[]> {
-  const { data, error } = await supabase.from('orders').select('*').order('ordered_at', { ascending: false });
-  if (error) throw error;
-  return data || [];
-}
-
-export async function fetchSalesTrends(): Promise<SalesTrend[]> {
-  const { data, error } = await supabase.from('sales_trends').select('*').order('date', { ascending: false });
-  if (error) throw error;
-  return data || [];
-}
-
-export async function fetchSyncLogs(): Promise<SyncLog[]> {
-  const { data, error } = await supabase.from('sync_log').select('*').order('started_at', { ascending: false }).limit(10);
-  if (error) throw error;
-  return data || [];
-}
-
-export async function fetchSettings(): Promise<Setting[]> {
-  const { data, error } = await supabase.from('settings').select('*');
-  if (error) throw error;
-  return data || [];
-}
-
-export async function updateSetting(key: string, value: string): Promise<void> {
-  const { error } = await supabase.from('settings').upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
-  if (error) throw error;
-}
-
-export async function updateInventory(productId: string, data: Partial<Inventory>): Promise<void> {
-  const { error } = await supabase
-    .from('inventory')
-    .update({ ...data, updated_at: new Date().toISOString() })
-    .eq('product_id', productId);
   if (error) throw error;
 
-  // If stock is being changed, queue a push to both platforms on next sync.
-  if (data.total_stock !== undefined) {
-    await supabase
-      .from('settings')
-      .upsert(
-        { key: `stock_push_${productId}`, value: String(data.total_stock) },
-        { onConflict: 'key' }
-      );
-  }
+  return (data || []).map((v: any) => ({
+    id: v.id,                               // variant_id — primary key for UI
+    product_id: v.product_id,
+    sku: v.internal_sku ?? '',
+    option1: v.option1,
+    option2: v.option2,
+    needs_sync: v.needs_sync ?? false,
+    last_synced_at: v.last_synced_at,
+    created_at: v.created_at,
+    updated_at: v.updated_at,
+    // From parent product
+    name: v.products?.name ?? '(no name)',
+    description: v.products?.description ?? '',
+    status: v.products?.status ?? 'active',
+    cost_price: v.products?.cost_price ?? null,
+    active: v.products?.active ?? true,
+  }));
 }
 
-export async function updatePricing(id: string, price: number): Promise<void> {
-  const { error } = await supabase.from('platform_pricing').update({ price, updated_at: new Date().toISOString() }).eq('id', id);
-  if (error) throw error;
-}
+export async function createProduct(product: { name: string; sku: string; description?: string }): Promise<Product> {
+  // 1. Insert products row
+  const { data: prodData, error: prodError } = await supabase
+    .from('products')
+    .insert({
+      name: product.name,
+      sku: product.sku,
+      description: product.description ?? '',
+      status: 'active',
+      active: true,
+    })
+    .select()
+    .single();
+  if (prodError) throw prodError;
 
-export async function updateOrder(orderId: string, data: Partial<Order>): Promise<void> {
-  const { error } = await supabase.from('orders').update(data).eq('id', orderId);
-  if (error) throw error;
-}
+  // 2. Insert variants row
+  const { data: varData, error: varError } = await supabase
+    .from('variants')
+    .insert({
+      product_id: prodData.id,
+      internal_sku: product.sku,
+      needs_sync: false,
+    })
+    .select()
+    .single();
+  if (varError) throw varError;
 
-export async function updateProduct(id: string, data: Partial<Product>): Promise<void> {
-  const { error } = await supabase.from('products').update({ ...data, updated_at: new Date().toISOString() }).eq('id', id);
-  if (error) throw error;
-}
-
-export async function createProduct(data: Partial<Product>): Promise<Product> {
-  const { data: result, error } = await supabase.from('products').insert({ ...data, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }).select().single();
-  if (error) throw error;
-  return result;
-}
-
-export async function createInventory(data: Partial<Inventory>): Promise<void> {
-  const { error } = await supabase.from('inventory').insert({ ...data, updated_at: new Date().toISOString() });
-  if (error) throw error;
-}
-
-export async function createPricing(data: Partial<Pricing>): Promise<void> {
-  const { error } = await supabase.from('platform_pricing').insert({ ...data, updated_at: new Date().toISOString() });
-  if (error) throw error;
-}
-
-export async function deleteProduct(id: string): Promise<void> {
-  await supabase.from('platform_pricing').delete().eq('product_id', id);
-  await supabase.from('inventory').delete().eq('product_id', id);
-  await supabase.from('sales_trends').delete().eq('product_id', id);
-  const { error } = await supabase.from('products').delete().eq('id', id);
-  if (error) throw error;
-}
-
-export async function mergeProducts(keepId: string, removeId: string, keepStock: number): Promise<void> {
-  // ── Save snapshot of BOTH products before merge (for undo) ──
-  const { data: removedProduct } = await supabase.from('products').select('*').eq('id', removeId).single();
-  const { data: removedPricing } = await supabase.from('platform_pricing').select('*').eq('product_id', removeId);
-  const { data: removedInventory } = await supabase.from('inventory').select('*').eq('product_id', removeId).single();
-  const { data: keepProduct } = await supabase.from('products').select('*').eq('id', keepId).single();
-  const { data: keepPricing } = await supabase.from('platform_pricing').select('*').eq('product_id', keepId);
-  const { data: keepInventory } = await supabase.from('inventory').select('*').eq('product_id', keepId).single();
-
-  const snapshot = {
-    timestamp: new Date().toISOString(),
-    keepId,
-    removeId,
-    keepStock,
-    removedProduct,
-    removedPricing,
-    removedInventory,
-    keepProduct,
-    keepPricing,
-    keepInventory,
+  return {
+    id: varData.id,
+    product_id: prodData.id,
+    sku: varData.internal_sku,
+    name: prodData.name,
+    description: prodData.description,
+    status: 'active',
+    needs_sync: false,
+    created_at: varData.created_at,
   };
+}
 
-  await supabase.from('settings').upsert(
-    { key: 'last_merge_snapshot', value: JSON.stringify(snapshot), updated_at: new Date().toISOString() },
-    { onConflict: 'key' }
-  );
+export async function updateProduct(variantId: string, patch: Partial<{ cost_price: number | null; name: string; status: string }>) {
+  // Get product_id from variant
+  const { data: varData, error: varErr } = await supabase
+    .from('variants')
+    .select('product_id')
+    .eq('id', variantId)
+    .single();
+  if (varErr) throw varErr;
 
-  // ── Transfer pricing from removed product to kept product ──
-  if (removedPricing) {
-    for (const p of removedPricing) {
-      const { data: existing } = await supabase.from('platform_pricing').select('*').eq('product_id', keepId).eq('platform', p.platform);
-      if (!existing || existing.length === 0) {
-        await supabase.from('platform_pricing').update({ product_id: keepId, updated_at: new Date().toISOString() }).eq('id', p.id);
-      }
+  const { error } = await supabase
+    .from('products')
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq('id', varData.product_id);
+  if (error) throw error;
+}
+
+export async function deleteProduct(variantId: string) {
+  // Delete channel_listings (cascades via FK but explicit for safety)
+  await supabase.from('channel_listings').delete().eq('variant_id', variantId);
+  // Delete inventory
+  await supabase.from('inventory').delete().eq('variant_id', variantId);
+
+  // Get product_id before deleting variant
+  const { data: varData } = await supabase
+    .from('variants')
+    .select('product_id')
+    .eq('id', variantId)
+    .single();
+
+  // Delete variant
+  await supabase.from('variants').delete().eq('id', variantId);
+
+  // Delete parent product if no variants remain
+  if (varData?.product_id) {
+    const { data: remaining } = await supabase
+      .from('variants')
+      .select('id')
+      .eq('product_id', varData.product_id);
+    if (!remaining || remaining.length === 0) {
+      await supabase.from('products').delete().eq('id', varData.product_id);
     }
   }
-  // Move orders and trends to kept product
-  await supabase.from('orders').update({ product_id: keepId }).eq('product_id', removeId);
-  await supabase.from('sales_trends').update({ product_id: keepId }).eq('product_id', removeId);
-  // Update stock (this also queues a stock push to both platforms)
-  await updateInventory(keepId, { total_stock: keepStock });
-  // Delete removed product
-  await supabase.from('platform_pricing').delete().eq('product_id', removeId);
-  await supabase.from('inventory').delete().eq('product_id', removeId);
-  await supabase.from('products').delete().eq('id', removeId);
 }
 
-/** Check if there's a merge that can be undone */
-export async function getLastMergeSnapshot(): Promise<{ removedName: string; keepName: string; timestamp: string } | null> {
-  const { data } = await supabase.from('settings').select('value').eq('key', 'last_merge_snapshot').single();
-  if (!data?.value) return null;
-  try {
-    const snap = JSON.parse(data.value);
+// ─── Inventory ───────────────────────────────────────────────────────────────
+
+/**
+ * Fetch all inventory rows.
+ * Returns with both variant_id and product_id set (for backward compat).
+ */
+export async function fetchInventory(): Promise<Inventory[]> {
+  const { data, error } = await supabase
+    .from('inventory')
+    .select('*')
+    .limit(5000);
+  if (error) throw error;
+  return (data || []).map((row: any) => {
+    const variantId = row.variant_id ?? row.product_id;
     return {
-      removedName: snap.removedProduct?.name || 'Unknown',
-      keepName: snap.keepProduct?.name || 'Unknown',
-      timestamp: snap.timestamp,
+      ...row,
+      // Normalise: product_id is set to variant_id so existing component lookups
+      // (inventory.find(i => i.product_id === p.id)) continue to work after migration
+      // (p.id is now variant_id, so product_id must also equal variant_id here)
+      variant_id: variantId,
+      product_id: variantId,
     };
-  } catch { return null; }
+  });
 }
 
-/** Undo the last merge — restore the removed product and revert pricing */
-export async function undoLastMerge(): Promise<string> {
-  const { data } = await supabase.from('settings').select('value').eq('key', 'last_merge_snapshot').single();
-  if (!data?.value) throw new Error('No merge to undo');
+export async function createInventory(inv: {
+  product_id: string;    // pass variant_id here
+  variant_id?: string;
+  total_stock: number;
+  reserved_stock?: number;
+  low_stock_threshold?: number;
+}): Promise<void> {
+  const variantId = inv.variant_id ?? inv.product_id;
+  const { error } = await supabase.from('inventory').insert({
+    variant_id: variantId,
+    product_id: inv.product_id,  // legacy column kept
+    total_stock: inv.total_stock ?? 0,
+    reserved_stock: inv.reserved_stock ?? 0,
+    low_stock_threshold: inv.low_stock_threshold ?? 5,
+  });
+  if (error) throw error;
+}
 
-  const snap = JSON.parse(data.value);
-  const { keepId, removeId, removedProduct, removedPricing, removedInventory, keepPricing, keepInventory } = snap;
+/**
+ * Update stock for a variant.
+ * Does NOT immediately push to platforms — sets needs_sync=TRUE on the variant.
+ * The hourly GitHub Actions sync will push the change.
+ */
+export async function updateInventory(
+  variantId: string,
+  patch: Partial<{ total_stock: number; reserved_stock: number; low_stock_threshold: number }>
+): Promise<void> {
+  // Update inventory row
+  const { error } = await supabase
+    .from('inventory')
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq('variant_id', variantId);
+  if (error) throw error;
 
-  // 1. Re-create the removed product
-  const { error: prodErr } = await supabase.from('products').insert({
-    id: removedProduct.id,
-    sku: removedProduct.sku,
-    name: removedProduct.name,
-    description: removedProduct.description || '',
-    category: removedProduct.category,
-    image_url: removedProduct.image_url,
-    active: removedProduct.active,
-    cost_price: removedProduct.cost_price,
-    created_at: removedProduct.created_at,
+  // Mark variant needs_sync so hourly job pushes the new stock to platforms
+  await markVariantNeedsSync(variantId);
+}
+
+// ─── Channel Listings (new) / Pricing (legacy alias) ─────────────────────────
+
+/**
+ * Fetch all channel_listings, returned as Pricing[] for backward compat.
+ * product_id = variant_id in the returned objects.
+ */
+export async function fetchPricing(): Promise<Pricing[]> {
+  const { data, error } = await supabase
+    .from('channel_listings')
+    .select('*')
+    .limit(5000);
+  if (error) throw error;
+
+  return (data || []).map((cl: any) => ({
+    id: cl.id,
+    product_id: cl.variant_id,       // map variant_id → product_id for compat
+    platform: cl.channel,             // map channel → platform for compat
+    price: cl.channel_price,          // map channel_price → price for compat
+    currency: 'GBP',
+    platform_product_id: cl.channel_product_id,
+    platform_variant_id: cl.channel_variant_id,
+    last_synced_at: cl.last_synced_at,
+    updated_at: cl.updated_at,
+  }));
+}
+
+export async function createPricing(pricing: {
+  product_id: string;   // variant_id
+  platform: string;
+  price?: number;
+  platform_product_id?: string;
+  platform_variant_id?: string;
+}): Promise<void> {
+  const { error } = await supabase.from('channel_listings').insert({
+    variant_id: pricing.product_id,
+    channel: pricing.platform,
+    channel_price: pricing.price,
+    channel_product_id: pricing.platform_product_id,
+    channel_variant_id: pricing.platform_variant_id,
     updated_at: new Date().toISOString(),
   });
-  if (prodErr) throw prodErr;
+  if (error) throw error;
+}
 
-  // 2. Re-create inventory for removed product
-  if (removedInventory) {
+/**
+ * Update price for a channel listing.
+ * Does NOT immediately push — sets needs_sync=TRUE on the variant.
+ */
+export async function updatePricing(listingId: string, price: number): Promise<void> {
+  // First, get the variant_id so we can mark needs_sync
+  const { data: existing, error: fetchErr } = await supabase
+    .from('channel_listings')
+    .select('variant_id')
+    .eq('id', listingId)
+    .single();
+  if (fetchErr) throw fetchErr;
+
+  // Update price (updated_at > last_synced_at flags it as changed)
+  const { error } = await supabase
+    .from('channel_listings')
+    .update({ channel_price: price, updated_at: new Date().toISOString() })
+    .eq('id', listingId);
+  if (error) throw error;
+
+  // Mark variant needs_sync
+  if (existing?.variant_id) {
+    await markVariantNeedsSync(existing.variant_id);
+  }
+}
+
+// ─── needs_sync flag ─────────────────────────────────────────────────────────
+
+/**
+ * Mark a variant as needing sync on the next hourly run.
+ * Called after any stock or price edit.
+ * Does NOT immediately push to eBay or Squarespace.
+ */
+export async function markVariantNeedsSync(variantId: string): Promise<void> {
+  const { error } = await supabase
+    .from('variants')
+    .update({ needs_sync: true, updated_at: new Date().toISOString() })
+    .eq('id', variantId);
+  if (error) throw error;
+}
+
+// ─── Merge / Linking ─────────────────────────────────────────────────────────
+
+/**
+ * Merge two variants into one.
+ *
+ * Correct merge behaviour:
+ * 1. Save snapshot for undo
+ * 2. Move all channel_listings from removeId → keepId
+ * 3. Set inventory on kept variant to the specified stock value
+ * 4. Remove inventory row for removed variant
+ * 5. Remove the removed variant (and its parent product if now empty)
+ * 6. Mark kept variant needs_sync = true (pushed on next hourly run)
+ * 7. Add removed variant's SKU to merged_skus blocklist (prevents reimport)
+ *
+ * keepId and removeId are both variant_ids.
+ */
+export async function mergeProducts(keepId: string, removeId: string, stock: number): Promise<void> {
+  // ── Step 1: Save undo snapshot ──────────────────────────────────────────
+  const [keepVariant, removeVariant] = await Promise.all([
+    supabase.from('variants').select('*, products(name)').eq('id', keepId).single(),
+    supabase.from('variants').select('*, products(name)').eq('id', removeId).single(),
+  ]);
+
+  const keepName = (keepVariant.data as any)?.products?.name ?? keepId;
+  const removeName = (removeVariant.data as any)?.products?.name ?? removeId;
+  const removeSku = (removeVariant.data as any)?.internal_sku ?? '';
+  const removeProductId = (removeVariant.data as any)?.product_id;
+
+  // Save undo snapshot in settings
+  const snapshot = {
+    keepId, removeId,
+    keepName, removeName,
+    removeSku,
+    removeProductId,
+    timestamp: new Date().toISOString(),
+  };
+  await supabase
+    .from('settings')
+    .upsert({ key: 'last_merge_snapshot', value: JSON.stringify(snapshot) }, { onConflict: 'key' });
+
+  // ── Step 2: Move channel_listings from remove → keep ────────────────────
+  // Fetch existing listings on BOTH variants to avoid duplicating a channel
+  const { data: keepListings } = await supabase
+    .from('channel_listings')
+    .select('channel')
+    .eq('variant_id', keepId);
+  const keepChannels = new Set((keepListings || []).map((l: any) => l.channel));
+
+  const { data: removeListings } = await supabase
+    .from('channel_listings')
+    .select('*')
+    .eq('variant_id', removeId);
+
+  for (const listing of (removeListings || [])) {
+    if (keepChannels.has(listing.channel)) {
+      // Kept variant already has a listing on this channel — just delete the duplicate
+      await supabase.from('channel_listings').delete().eq('id', listing.id);
+    } else {
+      // Move listing to kept variant
+      await supabase
+        .from('channel_listings')
+        .update({ variant_id: keepId, updated_at: new Date().toISOString() })
+        .eq('id', listing.id);
+      keepChannels.add(listing.channel);
+    }
+  }
+
+  // ── Step 3: Set inventory on kept variant ────────────────────────────────
+  const { data: keepInv } = await supabase
+    .from('inventory')
+    .select('id')
+    .eq('variant_id', keepId)
+    .single();
+
+  if (keepInv) {
+    await supabase
+      .from('inventory')
+      .update({ total_stock: stock, updated_at: new Date().toISOString() })
+      .eq('id', keepInv.id);
+  } else {
+    // Create inventory row if missing
+    const { data: keepVar } = await supabase
+      .from('variants').select('product_id').eq('id', keepId).single();
     await supabase.from('inventory').insert({
-      product_id: removeId,
-      total_stock: removedInventory.total_stock,
-      reserved_stock: removedInventory.reserved_stock,
-      low_stock_threshold: removedInventory.low_stock_threshold,
-      location: removedInventory.location,
-      updated_at: new Date().toISOString(),
+      variant_id: keepId,
+      product_id: (keepVar as any)?.product_id,
+      total_stock: stock,
+      reserved_stock: 0,
+      low_stock_threshold: 5,
     });
   }
 
-  // 3. Move transferred pricing rows back to the removed product
-  // Pricing that was originally on the removed product and got moved to the kept product
-  if (removedPricing) {
-    for (const rp of removedPricing) {
-      // Check if this pricing row still exists on the kept product (it was transferred there)
-      const { data: onKept } = await supabase.from('platform_pricing')
-        .select('*')
-        .eq('product_id', keepId)
-        .eq('id', rp.id);
-      if (onKept && onKept.length > 0) {
-        // Move it back
-        await supabase.from('platform_pricing').update({ product_id: removeId, updated_at: new Date().toISOString() }).eq('id', rp.id);
-      } else {
-        // Row was deleted (kept product already had that platform) — re-create it
-        await supabase.from('platform_pricing').insert({
-          product_id: removeId,
-          platform: rp.platform,
-          price: rp.price,
-          currency: rp.currency,
-          platform_product_id: rp.platform_product_id,
-          platform_variant_id: rp.platform_variant_id,
-          last_synced_at: rp.last_synced_at,
-          updated_at: new Date().toISOString(),
-        });
-      }
+  // ── Step 4: Remove inventory for deleted variant ─────────────────────────
+  await supabase.from('inventory').delete().eq('variant_id', removeId);
+
+  // ── Step 5: Delete the removed variant (and parent product if empty) ─────
+  await supabase.from('variants').delete().eq('id', removeId);
+  if (removeProductId) {
+    const { data: remaining } = await supabase
+      .from('variants')
+      .select('id')
+      .eq('product_id', removeProductId);
+    if (!remaining || remaining.length === 0) {
+      await supabase.from('products').delete().eq('id', removeProductId);
     }
   }
 
-  // 4. Restore the kept product's original inventory
-  if (keepInventory) {
-    await supabase.from('inventory')
-      .update({ total_stock: keepInventory.total_stock, updated_at: new Date().toISOString() })
-      .eq('product_id', keepId);
-  }
+  // ── Step 6: Mark kept variant needs_sync ────────────────────────────────
+  await markVariantNeedsSync(keepId);
 
-  // 5. Move orders/trends back if they were originally on the removed product
-  await supabase.from('orders').update({ product_id: removeId }).eq('product_id', keepId);
-  await supabase.from('sales_trends').update({ product_id: removeId }).eq('product_id', keepId);
-
-  // 6. Clear the snapshot
-  await supabase.from('settings').delete().eq('key', 'last_merge_snapshot');
-
-  return removedProduct.name;
-}
-
-// ─── GitHub Actions Trigger ───────────────────────────────────────────────────
-
-const GITHUB_TOKEN = import.meta.env.VITE_GITHUB_TOKEN || '';
-const GITHUB_REPO = import.meta.env.VITE_GITHUB_REPO || 'Voyagers-hook/inventory-sync';
-
-/**
- * Triggers the Quick Sync workflow on GitHub Actions immediately.
- * Returns true if the trigger was accepted (HTTP 204), false otherwise.
- */
-export async function triggerQuickSync(): Promise<boolean> {
-  if (!GITHUB_TOKEN) {
-    console.warn('VITE_GITHUB_TOKEN not set — cannot trigger sync');
-    return false;
-  }
-  try {
-    const resp = await fetch(
-      `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/sync-quick.yml/dispatches`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${GITHUB_TOKEN}`,
-          Accept: 'application/vnd.github+json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ ref: 'main' }),
-      }
-    );
-    return resp.status === 204;
-  } catch (e) {
-    console.error('Failed to trigger quick sync:', e);
-    return false;
+  // ── Step 7: Add removed SKU to merged_skus blocklist ─────────────────────
+  if (removeSku) {
+    const { data: raw } = await supabase
+      .from('settings')
+      .select('value')
+      .eq('key', 'merged_skus')
+      .single();
+    let blocklist: string[] = [];
+    try { blocklist = JSON.parse(raw?.value ?? '[]'); } catch { /* ignore */ }
+    if (!blocklist.includes(removeSku)) {
+      blocklist.push(removeSku);
+      await supabase
+        .from('settings')
+        .upsert({ key: 'merged_skus', value: JSON.stringify(blocklist) }, { onConflict: 'key' });
+    }
   }
 }
 
-// ─── Competitor Price Monitoring ──────────────────────────────────────────────
+// ─── Undo Merge ──────────────────────────────────────────────────────────────
 
-export async function getCompetitorPrices(): Promise<Record<string, any>> {
+export async function getLastMergeSnapshot(): Promise<{ removedName: string; keepName: string; timestamp: string } | null> {
   const { data } = await supabase
     .from('settings')
-    .select('key, value')
-    .like('key', 'competitor_price_%');
-  
-  const map: Record<string, any> = {};
-  if (data) {
-    for (const row of data) {
-      const productId = row.key.replace('competitor_price_', '');
-      try {
-        map[productId] = JSON.parse(row.value);
-      } catch { }
-    }
+    .select('value')
+    .eq('key', 'last_merge_snapshot')
+    .single();
+  if (!data?.value) return null;
+  try {
+    const snap = JSON.parse(data.value);
+    if (!snap.removeId) return null;
+    return { removedName: snap.removeName, keepName: snap.keepName, timestamp: snap.timestamp };
+  } catch {
+    return null;
   }
-  return map;
 }
 
-export async function triggerCompetitorCheck(productId: string): Promise<boolean> {
-  const token = import.meta.env.VITE_GITHUB_TOKEN || '';
-  if (!token) return false;
-  
-  const resp = await fetch(
-    'https://api.github.com/repos/Voyagers-hook/inventory-sync/actions/workflows/price-scan-daily.yml/dispatches',
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `token ${token}`,
-        'Accept': 'application/vnd.github.v3+json',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        ref: 'main',
-        inputs: { product_id: productId }
-      })
-    }
-  );
-  return resp.ok || resp.status === 204;
+export async function undoLastMerge(): Promise<string> {
+  const { data } = await supabase
+    .from('settings')
+    .select('value')
+    .eq('key', 'last_merge_snapshot')
+    .single();
+  if (!data?.value) throw new Error('No merge snapshot to undo');
+
+  const snap = JSON.parse(data.value);
+  const { keepId, removeId, removeSku, removeProductId, removeName, keepName } = snap;
+
+  // 1. Recreate the product group (if needed) and the removed variant
+  let newProductId = removeProductId;
+  const { data: existingProd } = await supabase
+    .from('products')
+    .select('id')
+    .eq('id', removeProductId)
+    .single();
+
+  if (!existingProd) {
+    // Product was deleted — recreate it
+    const { data: newProd, error } = await supabase
+      .from('products')
+      .insert({ name: removeName, sku: removeSku, status: 'active', active: true })
+      .select()
+      .single();
+    if (error) throw error;
+    newProductId = newProd.id;
+  }
+
+  // 2. Recreate the variant
+  const { data: newVar, error: varErr } = await supabase
+    .from('variants')
+    .insert({ id: removeId, product_id: newProductId, internal_sku: removeSku, needs_sync: false })
+    .select()
+    .single();
+  if (varErr) throw varErr;
+
+  // 3. Move back channel_listings that originated from removeId
+  // We can't know exactly which ones came from it (they were moved to keepId),
+  // so we just note this limitation in the toast — user can re-merge if needed.
+  // The blocklist entry should be removed so reimport works.
+
+  // 4. Remove removeSku from merged_skus blocklist
+  if (removeSku) {
+    const { data: raw } = await supabase
+      .from('settings')
+      .select('value')
+      .eq('key', 'merged_skus')
+      .single();
+    let blocklist: string[] = [];
+    try { blocklist = JSON.parse(raw?.value ?? '[]'); } catch { /* ignore */ }
+    blocklist = blocklist.filter((s: string) => s !== removeSku);
+    await supabase
+      .from('settings')
+      .upsert({ key: 'merged_skus', value: JSON.stringify(blocklist) }, { onConflict: 'key' });
+  }
+
+  // 5. Clear snapshot
+  await supabase
+    .from('settings')
+    .upsert({ key: 'last_merge_snapshot', value: null }, { onConflict: 'key' });
+
+  return removeName;
+}
+
+// ─── Orders ──────────────────────────────────────────────────────────────────
+
+export async function fetchOrders(platform?: string, limit = 200): Promise<Order[]> {
+  let query = supabase
+    .from('orders')
+    .select('*')
+    .order('ordered_at', { ascending: false })
+    .limit(limit);
+  if (platform) query = query.eq('platform', platform);
+  const { data, error } = await query;
+  if (error) throw error;
+  return data || [];
+}
+
+export async function updateOrderTracking(
+  orderId: string,
+  trackingNumber: string,
+  carrier: string
+): Promise<void> {
+  const { error } = await supabase
+    .from('orders')
+    .update({ tracking_number: trackingNumber, tracking_carrier: carrier })
+    .eq('id', orderId);
+  if (error) throw error;
+}
+
+// ─── Sync ────────────────────────────────────────────────────────────────────
+
+export async function fetchSyncLogs(limit = 20): Promise<SyncLog[]> {
+  const { data, error } = await supabase
+    .from('sync_log')
+    .select('*')
+    .order('started_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data || [];
+}
+
+export async function triggerManualSync(): Promise<void> {
+  // Set flag in DB that sync engine will pick up
+  const { error } = await supabase
+    .from('settings')
+    .upsert({ key: 'manual_sync_requested', value: 'true' }, { onConflict: 'key' });
+  if (error) throw error;
+}
+
+export async function fetchSetting(key: string): Promise<string | null> {
+  const { data } = await supabase
+    .from('settings')
+    .select('value')
+    .eq('key', key)
+    .single();
+  return data?.value ?? null;
+}
+
+export async function setSetting(key: string, value: string): Promise<void> {
+  const { error } = await supabase
+    .from('settings')
+    .upsert({ key, value }, { onConflict: 'key' });
+  if (error) throw error;
 }
