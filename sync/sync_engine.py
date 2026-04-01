@@ -604,24 +604,41 @@ class SyncEngine:
     # ─── Main Sync Entry Points ──────────────────────────────────────────────
 
     def run_full_sync(self):
-        """Hourly sync: INCREMENTAL — new listings only + orders + sync queue.
-        Fast and safe. Never does full catalogue unless DB is empty.
+        """Hourly sync: new listings + orders + sync queue.
+
+        Full catalogue refresh runs when:
+          - DB is empty (first run / after a reset)
+          - OR more than 24 hours have passed since the last catalogue sync
+            (picks up any new Squarespace OR eBay products added since then)
+
+        In between hourly runs: fast eBay-only incremental check for new listings.
         """
         total = 0
         product_count = self.db.count_products()
+        now = datetime.now(timezone.utc)
 
-        if product_count == 0:
-            logger.info("No products in DB — running initial full catalogue import...")
+        last_cat_sync = self.db.get_setting("last_catalogue_sync")
+        hours_since_catalogue = 999.0
+        if last_cat_sync:
+            try:
+                last_time = datetime.fromisoformat(last_cat_sync.replace("Z", "+00:00"))
+                hours_since_catalogue = (now - last_time).total_seconds() / 3600
+            except Exception:
+                pass
+
+        if product_count == 0 or hours_since_catalogue >= 24:
+            logger.info(
+                "Running full catalogue sync (products=%d, hours_since_last=%.1f)...",
+                product_count, hours_since_catalogue,
+            )
             total += self.sync_product_catalogue()
-            self.db.set_setting("last_catalogue_sync",
-                                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            self.db.set_setting("last_catalogue_sync", now.strftime("%Y-%m-%dT%H:%M:%SZ"))
         else:
-            last_cat_sync = self.db.get_setting("last_catalogue_sync")
             if not last_cat_sync:
-                last_cat_sync = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                last_cat_sync = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            logger.info("Incremental eBay check (%.1f h since last full catalogue)", hours_since_catalogue)
             total += self.sync_new_listings(last_cat_sync)
-            self.db.set_setting("last_catalogue_sync",
-                                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            self.db.set_setting("last_catalogue_sync", now.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
         last = self.db.get_setting("last_full_sync")
         since = last if last else (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
