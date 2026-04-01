@@ -391,12 +391,7 @@ class SyncEngine:
             if status not in ("PENDING", "FULFILLED"):
                 continue
 
-            billing = order.get("billingAddress", {})
-            shipping = order.get("shippingAddress", {}) or billing
-            customer_name = f"{shipping.get('firstName', '')} {shipping.get('lastName', '')}".strip()
-            customer_email = order.get("customerEmail", "")
-
-            order_saved = False
+            # Save one row per line item (no customer data stored)
             for line in order.get("lineItems", []):
                 variant_id = line.get("variantId")
                 qty_sold = int(line.get("quantity", 1))
@@ -406,31 +401,21 @@ class SyncEngine:
                 if not product:
                     logger.warning(f"SS SKU {sku} not in DB — saving order without product link")
 
-                if not order_saved:
-                    self.db.insert_order({
-                        "platform": "squarespace",
-                        "platform_order_id": order_id,
-                        "product_id": product["product_id"] if product else None,
-                        "sku": sku,
-                        "quantity": qty_sold,
-                        "unit_price": price,
-                        "currency": "GBP",
-                        "status": status,
-                        "ordered_at": order.get("createdOn"),
-                        "customer_name": customer_name,
-                        "customer_email": customer_email,
-                        "shipping_address_line1": shipping.get("address1", ""),
-                        "shipping_address_line2": shipping.get("address2", ""),
-                        "shipping_city": shipping.get("city", ""),
-                        "shipping_county": shipping.get("state", ""),
-                        "shipping_postcode": shipping.get("postalCode", ""),
-                        "shipping_country": shipping.get("countryCode", ""),
-                        "fulfillment_status": status,
-                        "order_total": float(order.get("grandTotal", {}).get("value", 0)),
-                        "item_name": line.get("productName", ""),
-                        "order_number": order.get("orderNumber", ""),
-                    })
-                    order_saved = True
+                self.db.insert_order({
+                    "platform": "squarespace",
+                    "platform_order_id": order_id,
+                    "product_id": product["product_id"] if product else None,
+                    "sku": sku,
+                    "quantity": qty_sold,
+                    "unit_price": price,
+                    "currency": "GBP",
+                    "status": status,
+                    "ordered_at": order.get("createdOn"),
+                    "fulfillment_status": status,
+                    "order_total": round(price * qty_sold, 2),
+                    "item_name": line.get("productName", ""),
+                    "order_number": order.get("orderNumber", ""),
+                })
 
                 if product:
                     variant_db_id = product["id"]  # this is variant_id in v2
@@ -477,13 +462,7 @@ class SyncEngine:
             if self.db.order_exists("ebay", order_id):
                 continue
 
-            ship_to = order.get("fulfillmentStartInstructions", [{}])[0].get(
-                "shippingStep", {}).get("shipTo", {})
-            contact = ship_to.get("fullName", "")
-            address = ship_to.get("contactAddress", {})
-            buyer_info = order.get("buyer", {})
-
-            order_saved = False
+            # Save one row per line item (no customer data stored)
             for line in order.get("lineItems", []):
                 sku = line.get("sku", "")
                 legacy_item_id = line.get("legacyItemId", "")
@@ -499,31 +478,21 @@ class SyncEngine:
                 if not product:
                     logger.warning(f"eBay SKU '{sku}' / item {legacy_item_id} not in DB")
 
-                if not order_saved:
-                    self.db.insert_order({
-                        "platform": "ebay",
-                        "platform_order_id": order_id,
-                        "product_id": product["product_id"] if product else None,
-                        "sku": sku,
-                        "quantity": qty_sold,
-                        "unit_price": price,
-                        "currency": "GBP",
-                        "status": order.get("orderFulfillmentStatus", "NOT_STARTED"),
-                        "ordered_at": order.get("creationDate"),
-                        "customer_name": contact,
-                        "customer_email": buyer_info.get("username", "") + "@ebay.com",
-                        "shipping_address_line1": address.get("addressLine1", ""),
-                        "shipping_address_line2": address.get("addressLine2", ""),
-                        "shipping_city": address.get("city", ""),
-                        "shipping_county": address.get("stateOrProvince", ""),
-                        "shipping_postcode": address.get("postalCode", ""),
-                        "shipping_country": address.get("countryCode", ""),
-                        "fulfillment_status": order.get("orderFulfillmentStatus", "NOT_STARTED"),
-                        "order_total": float(order.get("totalFeeBasisAmount", {}).get("value", 0)),
-                        "item_name": line.get("title", ""),
-                        "order_number": order.get("orderId", ""),
-                    })
-                    order_saved = True
+                self.db.insert_order({
+                    "platform": "ebay",
+                    "platform_order_id": order_id,
+                    "product_id": product["product_id"] if product else None,
+                    "sku": sku,
+                    "quantity": qty_sold,
+                    "unit_price": price,
+                    "currency": "GBP",
+                    "status": order.get("orderFulfillmentStatus", "NOT_STARTED"),
+                    "ordered_at": order.get("creationDate"),
+                    "fulfillment_status": order.get("orderFulfillmentStatus", "NOT_STARTED"),
+                    "order_total": round(price * qty_sold, 2),
+                    "item_name": line.get("title", ""),
+                    "order_number": order.get("orderId", ""),
+                })
 
                 if product:
                     variant_db_id = product["id"]  # variant_id in v2
@@ -751,10 +720,27 @@ class SyncEngine:
             (picks up any new Squarespace OR eBay products added since then)
 
         In between hourly runs: fast eBay-only incremental check for new listings.
+        Skips entirely if a manual Sync Now ran within the last 30 minutes.
         """
         total = 0
-        product_count = self.db.count_products()
         now = datetime.now(timezone.utc)
+
+        # Skip if Sync Now button was used within the last 30 minutes
+        last_quick = self.db.get_setting("last_quick_sync_at")
+        if last_quick:
+            try:
+                lq_time = datetime.fromisoformat(last_quick.replace("Z", "+00:00"))
+                mins_ago = (now - lq_time).total_seconds() / 60
+                if mins_ago < 30:
+                    logger.info(
+                        "Manual Sync Now ran %.1f min ago — skipping scheduled hourly run to avoid overlap",
+                        mins_ago,
+                    )
+                    return 0
+            except Exception:
+                pass
+
+        product_count = self.db.count_products()
 
         last_cat_sync = self.db.get_setting("last_catalogue_sync")
         hours_since_catalogue = 999.0
@@ -799,8 +785,11 @@ class SyncEngine:
     def run_quick_check(self):
         """Triggered by Sync Now button: full catalogue refresh + orders + queues.
         Always does a complete re-fetch of all listings when manually triggered.
+        Records the timestamp so the next scheduled hourly run skips if this ran recently.
         """
         count = 0
+        # Record that a manual sync ran — hourly job will skip if within 30 minutes
+        self.db.set_setting("last_quick_sync_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
         count += self.push_pending_tracking()
         count += self.sync_pending_variants()

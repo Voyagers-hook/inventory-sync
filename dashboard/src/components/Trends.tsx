@@ -15,16 +15,18 @@ export const Trends: React.FC<TrendsProps> = ({ products, inventory, orders }) =
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
     const recentOrders = orders.filter(o => o.ordered_at && new Date(o.ordered_at) >= thirtyDaysAgo);
 
+    const lineRevenue = (o: Order) => Number(o.unit_price || 0) * Number(o.quantity || 1);
     const productStats = products.map(p => {
-      const pOrders = recentOrders.filter(o => o.product_id === p.id);
+      // orders.product_id = variants.product_id (parent product UUID); p.product_id = same
+      const pOrders = recentOrders.filter(o => o.product_id === p.product_id);
       const totalSold = pOrders.reduce((s, o) => s + (o.quantity || 0), 0);
-      const totalRevenue = pOrders.reduce((s, o) => s + Number(o.order_total || o.unit_price || 0), 0);
+      const totalRevenue = pOrders.reduce((s, o) => s + lineRevenue(o), 0);
       const velocity = totalSold / 30;
       const inv = inventory.find(i => i.product_id === p.id);
       const stock = inv?.total_stock || 0;
       const daysUntilOut = velocity > 0 ? Math.floor(stock / velocity) : 9999;
-      const sqRevenue = pOrders.filter(o => o.platform?.toLowerCase().includes('squarespace')).reduce((s, o) => s + Number(o.order_total || o.unit_price || 0), 0);
-      const ebRevenue = pOrders.filter(o => o.platform?.toLowerCase().includes('ebay')).reduce((s, o) => s + Number(o.order_total || o.unit_price || 0), 0);
+      const sqRevenue = pOrders.filter(o => o.platform?.toLowerCase().includes('squarespace')).reduce((s, o) => s + lineRevenue(o), 0);
+      const ebRevenue = pOrders.filter(o => o.platform?.toLowerCase().includes('ebay')).reduce((s, o) => s + lineRevenue(o), 0);
       return { id: p.id, name: p.name, velocity, stock, daysUntilOut, totalSold, totalRevenue, sqRevenue, ebRevenue };
     });
 

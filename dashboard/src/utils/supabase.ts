@@ -526,7 +526,7 @@ export async function undoLastMerge(): Promise<string> {
 
 // ─── Orders ──────────────────────────────────────────────────────────────────
 
-export async function fetchOrders(platform?: string, limit = 200): Promise<Order[]> {
+export async function fetchOrders(platform?: string, limit = 2000): Promise<Order[]> {
   let query = supabase
     .from('orders')
     .select('*')
