@@ -280,6 +280,7 @@ class EbayClient:
                 '<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
                 f'<ItemID>{legacy_id}</ItemID>'
                 '<DetailLevel>ReturnAll</DetailLevel>'
+                '<IncludeVariations>true</IncludeVariations>'
                 '</GetItemRequest>'
             )
             resp_text = self._trading_api_call("GetItem", xml_body)

@@ -105,6 +105,7 @@ class SyncEngine:
             self.db.upsert_price({
                 "product_id": product_id,   # shim translates to variant_id
                 "platform": "ebay",
+                "sku": sku,
                 "price": float(item.get("price", 0.0)),
                 "currency": "GBP",
                 "platform_product_id": item.get("item_id", sku),

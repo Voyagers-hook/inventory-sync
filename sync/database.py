@@ -461,7 +461,7 @@ class Database:
         listing = {
             "variant_id": variant_id,
             "channel": price_row.get("platform"),
-            "channel_sku": None,  # will be preserved from existing row if set
+            "channel_sku": price_row.get("sku") or None,
             "channel_price": price_row.get("price"),
             "channel_product_id": price_row.get("platform_product_id"),
             "channel_variant_id": price_row.get("platform_variant_id"),
