@@ -102,15 +102,19 @@ class SyncEngine:
                 if existing_skus is not None:
                     existing_skus.add(sku)  # keep in-memory set up to date
             variation_sku = item.get("variation_sku") if item.get("is_variant") else None
-            self.db.upsert_price({
-                "product_id": product_id,   # shim translates to variant_id
-                "platform": "ebay",
-                "sku": sku,
-                "price": float(item.get("price", 0.0)),
-                "currency": "GBP",
-                "platform_product_id": item.get("item_id", sku),
-                "platform_variant_id": variation_sku,
-            })
+            try:
+                self.db.upsert_price({
+                    "product_id": product_id,   # shim translates to variant_id
+                    "platform": "ebay",
+                    "sku": sku,
+                    "price": float(item.get("price", 0.0)),
+                    "currency": "GBP",
+                    "platform_product_id": item.get("item_id", sku),
+                    "platform_variant_id": variation_sku,
+                })
+                logger.debug("upsert_price OK for sku=%s variant_id=%s", sku, product_id)
+            except Exception as e:
+                logger.error("upsert_price FAILED for sku=%s variant_id=%s: %s", sku, product_id, e)
 
         return 1 if is_new else 0
 
@@ -353,14 +357,15 @@ class SyncEngine:
         # This way variants that exist but have no channel_listing still get processed.
         existing_skus = set()
         try:
-            rows = self.db._request("GET", "/rest/v1/channel_listings",
-                                    params={"select": "channel_sku", "channel": "eq.ebay", "limit": "10000"})
+            rows = self.db._rest("GET", "channel_listings",
+                                 params={"select": "channel_sku", "channel": "eq.ebay", "limit": "10000"})
             for r in rows:
                 s = r.get("channel_sku")
                 if s:
                     existing_skus.add(s)
-        except Exception:
-            pass  # fall back to per-item DB checks if this fails
+            logger.info("Pre-loaded %d existing eBay channel_skus", len(existing_skus))
+        except Exception as e:
+            logger.warning("Could not pre-load existing_skus — falling back to per-item DB checks: %s", e)
 
         # Get raw summary items (itemId, legacyItemId, title) — NOT expanded yet
         all_summaries = self.ebay._get_all_summary_items()
