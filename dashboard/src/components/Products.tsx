@@ -88,7 +88,7 @@ const PricingModal: React.FC<{
     } finally {
       setSaving(false);
     }
-  }, [product.id, costPrice, ssPricing, ssPrice, ebPricing, ebPrice, inv, stockValue, onSave, onClose]);
+  }, [product.id, costPrice, ssPricing, ssPrice, ebPricing, ebPrice, ebListingId, inv, stockValue, onSave, onClose]);
 
   return (
     <div className="modal modal-open">
