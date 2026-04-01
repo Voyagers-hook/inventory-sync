@@ -335,41 +335,59 @@ class SyncEngine:
 
     # ─── Incremental New Listings (Hourly) ───────────────────────────────────
 
-    def sync_new_listings(self, since_timestamp):
-        """Check for new eBay listings created since since_timestamp.
-        Fast: only fetches listings listed after that point (usually 0-5 per day).
-        Called every hourly sync.
+    def sync_missing_ebay_listings(self):
+        """Fetch ALL eBay listings, compare against DB, and import only the ones missing.
+
+        This replaces the old date-filtered sync_new_listings approach.
+        It catches any listing that was previously skipped/dropped regardless of age,
+        while doing zero extra work for the ~800 items already in the DB.
+        Called every hourly sync and on every Sync Now press.
         """
-        logger.info(f"Checking for new eBay listings since {since_timestamp}")
+        logger.info("Checking for missing eBay listings (full diff against DB)...")
 
         merged_skus, existing_ebay_item_ids = self._load_blocklists()
 
-        raw_new = self.ebay.get_new_listings(since_timestamp)
-        if not raw_new:
-            logger.info("No new eBay listings since last sync")
+        all_raw = self.ebay.get_inventory_items()
+        if not all_raw:
+            logger.info("No eBay listings returned")
             return 0
 
-        logger.info(f"Found {len(raw_new)} new listing(s) — expanding for variants...")
+        # Filter to only items whose bare eBay ID is NOT already in the DB
+        missing = []
+        for item in all_raw:
+            raw_id = item.get("item_id", "")
+            bare_id = raw_id.split("|")[1] if "|" in raw_id else raw_id
+            if bare_id and bare_id not in existing_ebay_item_ids:
+                missing.append(item)
+
+        if not missing:
+            logger.info("All %d eBay listings already in DB — nothing to import", len(all_raw))
+            return 0
+
+        logger.info(
+            "Found %d missing eBay listing(s) out of %d total — expanding...",
+            len(missing), len(all_raw)
+        )
 
         results = []
         seen_groups = set()
         lock = threading.Lock()
 
         with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(self.ebay._expand_item, item, seen_groups, lock) for item in raw_new]
+            futures = [executor.submit(self.ebay._expand_item, item, seen_groups, lock) for item in missing]
             for future in as_completed(futures):
                 try:
                     entries = future.result()
                     if entries:
                         results.extend(entries)
                 except Exception as e:
-                    logger.warning("New listing expansion error: %s", e)
+                    logger.warning("Listing expansion error: %s", e)
 
         added = 0
         for item in results:
             added += self._save_ebay_item(item, merged_skus, existing_ebay_item_ids)
 
-        logger.info(f"New listings sync: {added} new product(s) added")
+        logger.info("Missing listings sync: %d new product(s) added", added)
         return added
 
     # ─── Order Processing ────────────────────────────────────────────────────
@@ -753,19 +771,15 @@ class SyncEngine:
             except Exception:
                 pass
 
-        if product_count == 0 or hours_since_catalogue >= 24:
-            logger.info(
-                "Running full catalogue sync (products=%d, hours_since_last=%.1f)...",
-                product_count, hours_since_catalogue,
-            )
+        if product_count == 0:
+            # First ever run — do full catalogue to get Squarespace products too
+            logger.info("First run — importing full catalogue from both platforms...")
             total += self.sync_product_catalogue()
             self.db.set_setting("last_catalogue_sync", now.strftime("%Y-%m-%dT%H:%M:%SZ"))
         else:
-            if not last_cat_sync:
-                last_cat_sync = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            logger.info("Incremental eBay check (%.1f h since last full catalogue)", hours_since_catalogue)
-            total += self.sync_new_listings(last_cat_sync)
-            self.db.set_setting("last_catalogue_sync", now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            # Incremental: find any eBay listings not yet in DB and add them
+            logger.info("Incremental eBay diff check...")
+            total += self.sync_missing_ebay_listings()
 
         last = self.db.get_setting("last_full_sync")
         since = last if last else (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -797,12 +811,8 @@ class SyncEngine:
         count += self.sync_pending_variants()
         count += self.sync_pending_price_changes()
 
-        if self.db.is_sync_requested():
-            logger.info("Sync Now: running full catalogue refresh...")
-            self.db.clear_sync_request()
-            count += self.sync_product_catalogue()
-            self.db.set_setting("last_catalogue_sync",
-                                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        # Always check for any eBay listings not yet in DB
+        count += self.sync_missing_ebay_listings()
 
         last = self.db.get_setting("last_full_sync")
         since = last if last else (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
