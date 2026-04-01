@@ -249,7 +249,7 @@ class SyncEngine:
         new_sku_to_variant = {v["internal_sku"]: v["id"] for v in new_variants}
 
         for item in ebay_items:
-            sku = item.get("sku")
+            sku = item.get("sku") or item.get("item_id", "")
             if not sku or sku in merged_skus:
                 continue
 
@@ -467,7 +467,9 @@ class SyncEngine:
                 sku = line.get("sku", "")
                 legacy_item_id = line.get("legacyItemId", "")
                 qty_sold = int(line.get("quantity", 1))
-                price = float(line.get("lineItemCost", {}).get("value", 0))
+                # lineItemCost is the LINE TOTAL (qty × unit price) — divide to get unit price
+                line_total = float(line.get("lineItemCost", {}).get("value", 0))
+                price = round(line_total / max(1, qty_sold), 2)
 
                 product = self.db.get_product_by_sku(sku) if sku else None
                 if not product and legacy_item_id:
