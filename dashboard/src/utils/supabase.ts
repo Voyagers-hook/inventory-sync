@@ -13,7 +13,7 @@
  *   Edit stock  → sets needs_sync = true  (synced on next hourly GitHub Actions run)
  *   Edit price  → sets needs_sync = true  (synced on next hourly GitHub Actions run)
  *   Merge       → sets needs_sync = true on kept variant
- *   Sync Now    → triggers GitHub Actions workflow_dispatch
+ *   Sync Now    → reads github_token from settings, dispatches sync-quick.yml workflow
  */
 
 /// <reference types="vite/client" />
@@ -486,7 +486,7 @@ export async function undoLastMerge(): Promise<string> {
   }
 
   // 2. Recreate the variant
-  const { data: newVar, error: varErr } = await supabase
+  const { error: varErr } = await supabase
     .from('variants')
     .insert({ id: removeId, product_id: newProductId, internal_sku: removeSku, needs_sync: false })
     .select()
@@ -517,6 +517,9 @@ export async function undoLastMerge(): Promise<string> {
   await supabase
     .from('settings')
     .upsert({ key: 'last_merge_snapshot', value: null }, { onConflict: 'key' });
+
+  // Suppress unused variable warning
+  void keepId; void keepName;
 
   return removeName;
 }
@@ -557,14 +560,6 @@ export async function fetchSyncLogs(limit = 20): Promise<SyncLog[]> {
     .limit(limit);
   if (error) throw error;
   return data || [];
-}
-
-export async function triggerManualSync(): Promise<void> {
-  // Set flag in DB that sync engine will pick up
-  const { error } = await supabase
-    .from('settings')
-    .upsert({ key: 'manual_sync_requested', value: 'true' }, { onConflict: 'key' });
-  if (error) throw error;
 }
 
 export async function fetchSetting(key: string): Promise<string | null> {
@@ -626,14 +621,21 @@ export async function fetchSalesTrends(): Promise<SalesTrend[]> {
 }
 
 // ─── Quick Sync (GitHub Actions workflow_dispatch) ────────────────────────────
+//
+// Reads the GitHub PAT from the settings table at click-time (never compiled
+// into the bundle). User pastes their token once via Settings → GitHub Token.
+// Token needs repo + workflow scope on github.com/settings/tokens.
+
+const GITHUB_REPO = 'Voyagers-hook/inventory-sync';
 
 export async function triggerQuickSync(): Promise<boolean> {
-  const token = import.meta.env.VITE_GITHUB_TOKEN as string;
-  const repo = import.meta.env.VITE_GITHUB_REPO as string;
-  if (!token || !repo) return false;
+  // Read token from Supabase settings at runtime
+  const token = await fetchSetting('github_token');
+  if (!token) return false;
+
   try {
     const res = await fetch(
-      `https://api.github.com/repos/${repo}/actions/workflows/sync-quick.yml/dispatches`,
+      `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/sync-quick.yml/dispatches`,
       {
         method: 'POST',
         headers: {

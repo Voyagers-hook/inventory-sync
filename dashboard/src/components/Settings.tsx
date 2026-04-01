@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { Save, RefreshCw, Bell, Clock, Mail } from 'lucide-react';
+import { Save, RefreshCw, Bell, Clock, Mail, Key } from 'lucide-react';
 import type { Setting } from '../types';
 import { updateSetting, triggerQuickSync } from '../utils/supabase';
 
@@ -14,11 +14,13 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onRefresh }) => {
   const [syncEnabled, setSyncEnabled] = useState(getVal('sync_enabled') !== 'false');
   const [alertEmail, setAlertEmail] = useState(getVal('alert_email') || 'joebaynton@gmail.com');
   const [lowStockDefault, setLowStockDefault] = useState(getVal('default_low_stock_threshold') || '5');
+  const [githubToken, setGithubToken] = useState(getVal('github_token') || '');
+  const [tokenVisible, setTokenVisible] = useState(false);
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [toast, setToast] = useState('');
 
-  const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
+  const showToast = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 4000); };
 
   const handleSave = useCallback(async () => {
     setSaving(true);
@@ -26,6 +28,9 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onRefresh }) => {
       await updateSetting('sync_enabled', syncEnabled ? 'true' : 'false');
       await updateSetting('alert_email', alertEmail);
       await updateSetting('default_low_stock_threshold', lowStockDefault);
+      if (githubToken) {
+        await updateSetting('github_token', githubToken);
+      }
       showToast('Settings saved!');
       onRefresh();
     } catch {
@@ -33,14 +38,17 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onRefresh }) => {
     } finally {
       setSaving(false);
     }
-  }, [syncEnabled, alertEmail, lowStockDefault, onRefresh]);
+  }, [syncEnabled, alertEmail, lowStockDefault, githubToken, onRefresh]);
 
   const handleSyncNow = useCallback(async () => {
     setSyncing(true);
     try {
-      await updateSetting('manual_sync_requested', 'true');
       const triggered = await triggerQuickSync();
-      showToast(triggered ? '✓ Sync triggered — running now (~1 min)' : 'Sync queued — will run within the hour');
+      if (triggered) {
+        showToast('✓ Sync triggered — pushing changes to eBay & Squarespace now (~1 min)');
+      } else {
+        showToast('⚠ No GitHub token set — add one in the GitHub section below, then try again');
+      }
     } catch {
       showToast('Failed to trigger sync');
     } finally {
@@ -51,7 +59,7 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onRefresh }) => {
   return (
     <div className="flex flex-col gap-4">
       {toast && (
-        <div className={`rounded-xl px-4 py-3 text-sm font-medium ${toast.includes('Failed') ? 'bg-error/10 text-error border border-error/20' : 'bg-success/10 text-success border border-success/20'}`}>
+        <div className={`rounded-xl px-4 py-3 text-sm font-medium ${toast.includes('Failed') || toast.includes('⚠') ? 'bg-error/10 text-error border border-error/20' : 'bg-success/10 text-success border border-success/20'}`}>
           {toast}
         </div>
       )}
@@ -77,7 +85,53 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onRefresh }) => {
           </div>
           <div className="bg-base-200 rounded-xl p-3 text-xs text-base-content/50">
             <p className="font-medium text-base-content/70 mb-1">How syncing works</p>
-            <p>GitHub Actions runs every hour for free (unlimited on a public repo). Manual sync triggers the workflow immediately.</p>
+            <p>Hourly sync runs automatically. Manual sync dispatches immediately — requires a GitHub token (see below).</p>
+          </div>
+        </div>
+      </div>
+
+      {/* GitHub Token */}
+      <div className="bg-base-100 rounded-xl border border-base-300 shadow-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-base-300 bg-base-200/40 flex items-center gap-2">
+          <Key size={14} className="text-base-content/40" />
+          <h3 className="text-sm font-semibold text-base-content">GitHub Token</h3>
+        </div>
+        <div className="p-4 flex flex-col gap-3">
+          <div>
+            <label className="text-sm font-medium text-base-content block mb-1.5">Personal Access Token</label>
+            <p className="text-xs text-base-content/40 mb-2">
+              Required for the <strong>Sync Now</strong> button to work immediately.
+              Create one at{' '}
+              <a
+                href="https://github.com/settings/tokens/new?scopes=workflow&description=Inventory+Sync"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary underline"
+              >
+                github.com/settings/tokens
+              </a>
+              {' '}with <code className="bg-base-200 px-1 rounded">workflow</code> scope. Stored securely in your database, never in the app bundle.
+            </p>
+            <div className="flex items-center gap-2 bg-base-200 rounded-xl px-3 py-2.5">
+              <Key size={14} className="text-base-content/30 flex-shrink-0" />
+              <input
+                type={tokenVisible ? 'text' : 'password'}
+                className="bg-transparent outline-none text-sm flex-1 text-base-content placeholder:text-base-content/30 font-mono"
+                value={githubToken}
+                onChange={e => setGithubToken(e.target.value)}
+                placeholder={getVal('github_token') ? '••••••••••••••••••••' : 'ghp_xxxxxxxxxxxxxxxxxxxx'}
+              />
+              <button
+                className="text-xs text-base-content/40 hover:text-base-content transition-colors"
+                onClick={() => setTokenVisible(v => !v)}
+                type="button"
+              >
+                {tokenVisible ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            {getVal('github_token') && !githubToken && (
+              <p className="text-xs text-success mt-1.5">✓ Token saved — Sync Now is active</p>
+            )}
           </div>
         </div>
       </div>
@@ -129,7 +183,10 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onRefresh }) => {
       {/* Manual Sync */}
       <div className="bg-base-100 rounded-xl border border-base-300 p-4 shadow-sm">
         <h3 className="text-sm font-semibold text-base-content mb-1">Manual Sync</h3>
-        <p className="text-xs text-base-content/40 mb-3">Triggers the sync workflow immediately — completes in ~1 minute</p>
+        <p className="text-xs text-base-content/40 mb-3">
+          Immediately pushes all pending stock and price changes to eBay &amp; Squarespace (~1 min).
+          Requires GitHub token above.
+        </p>
         <button className="btn btn-secondary btn-sm gap-1.5" onClick={handleSyncNow} disabled={syncing}>
           <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
           {syncing ? 'Triggering...' : 'Sync Now'}
@@ -149,4 +206,3 @@ export const Settings: React.FC<SettingsProps> = ({ settings, onRefresh }) => {
     </div>
   );
 };
-
