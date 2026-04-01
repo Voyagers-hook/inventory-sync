@@ -372,8 +372,9 @@ export const Products: React.FC<ProductsProps> = ({
     const threshold = inv?.low_stock_threshold ?? 5;
     if (showLowStockOnly && (!inv || inv.total_stock > threshold)) return false;
     if (!search) return true;
-    const q = search.toLowerCase();
-    return p.name?.toLowerCase().includes(q) || p.sku?.toLowerCase().includes(q);
+    const keywords = search.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    const target = `${p.name ?? ''} ${p.sku ?? ''} ${p.option1 ?? ''} ${p.option2 ?? ''}`.toLowerCase();
+    return keywords.every(kw => target.includes(kw));
   });
 
   const toggleCheck = useCallback((id: string, e: React.MouseEvent) => {
