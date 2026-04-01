@@ -21,7 +21,7 @@ import { createClient } from '@supabase/supabase-js';
 import type { Product, Inventory, Pricing, Order, SyncLog, SalesTrend, Setting } from '../types';
 
 const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL as string) || 'https://czoppjnkjxmduldxlbqh.supabase.co';
-const SUPABASE_ANON_KEY = (import.meta.env.VITE_SUPABASE_ANON_KEY as string) || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN6b3Bwam5ranhtZHVsZHhsYnFoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzODExNzksImV4cCI6MjA4OTk1NzE3OX0.ehTRhOHFn6JAX3lKeEK0Tff8km6Q-8c0tZyIIf0qdR0';
+const SUPABASE_ANON_KEY = (import.meta.env.VITE_SUPABASE_ANON_KEY as string) || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN6b3Bwam5ranhtZHVsZHhsYnFoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzODExNzksImV4cCI6MjA4OTk1NzE3OX0.ehTRhOHFn6JAX3lKeEK0Tff8km6Q-8c0tZyIf0qdR0';
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -631,7 +631,10 @@ const GITHUB_REPO = 'Voyagers-hook/inventory-sync';
 export async function triggerQuickSync(): Promise<boolean> {
   // Read token from Supabase settings at runtime
   const token = await fetchSetting('github_token');
-  if (!token) return false;
+  if (!token) {
+    console.error('[triggerQuickSync] No github_token found in settings table');
+    return false;
+  }
 
   try {
     const res = await fetch(
@@ -646,8 +649,13 @@ export async function triggerQuickSync(): Promise<boolean> {
         body: JSON.stringify({ ref: 'main' }),
       }
     );
+    if (!res.ok && res.status !== 204) {
+      const body = await res.text().catch(() => '');
+      console.error(`[triggerQuickSync] GitHub API ${res.status}:`, body);
+    }
     return res.ok || res.status === 204;
-  } catch {
+  } catch (err) {
+    console.error('[triggerQuickSync] fetch error:', err);
     return false;
   }
 }

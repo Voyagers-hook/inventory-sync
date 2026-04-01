@@ -104,13 +104,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
       await updateSetting('manual_sync_requested', 'true');
       const triggered = await triggerQuickSync();
       setToast(triggered
-        ? '✓ Sync triggered — running now (~1 min)'
-        : '✓ Sync queued — will run on next hourly cycle'
+        ? 'Sync triggered — running now (~1 min)'
+        : 'No GitHub token saved — check Settings → GitHub Token'
       );
-      setTimeout(() => setToast(''), 5000);
+      setTimeout(() => setToast(''), 6000);
     } catch {
-      setToast('Failed to request sync');
-      setTimeout(() => setToast(''), 3000);
+      setToast('Error triggering sync — check browser console');
+      setTimeout(() => setToast(''), 4000);
     } finally {
       setSyncing(false);
     }
@@ -120,7 +120,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     <div className="flex flex-col gap-4">
       {toast && (
         <div className="bg-success/10 border border-success/30 text-success rounded-xl px-4 py-3 text-sm font-medium">
-          ✓ {toast}
+          {toast}
         </div>
       )}
 
