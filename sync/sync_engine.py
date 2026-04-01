@@ -336,27 +336,32 @@ class SyncEngine:
     # ─── Incremental New Listings (Hourly) ───────────────────────────────────
 
     def sync_missing_ebay_listings(self):
-        """Fetch ALL eBay listings, compare against DB, and import only the ones missing.
+        """Fetch ALL eBay listing summaries, compare against DB, expand and import only missing ones.
 
-        This replaces the old date-filtered sync_new_listings approach.
-        It catches any listing that was previously skipped/dropped regardless of age,
-        while doing zero extra work for the ~800 items already in the DB.
+        Calls _get_all_summary_items() which returns raw summary dicts with key "itemId" (camelCase).
+        Does NOT call get_inventory_items() — that returns already-expanded items and would
+        cause _expand_item to be called with the wrong key names.
         Called every hourly sync and on every Sync Now press.
         """
         logger.info("Checking for missing eBay listings (full diff against DB)...")
 
         merged_skus, existing_ebay_item_ids = self._load_blocklists()
 
-        all_raw = self.ebay.get_inventory_items()
-        if not all_raw:
+        # Get raw summary items (itemId, legacyItemId, title) — NOT expanded yet
+        all_summaries = self.ebay._get_all_summary_items()
+        if not all_summaries:
             logger.info("No eBay listings returned")
             return 0
 
         # Filter to only items whose bare eBay ID is NOT already in the DB
+        # all_summaries items use camelCase "itemId" key e.g. "v1|358337889902|0"
         missing = []
-        for item in all_raw:
-            raw_id = item.get("item_id", "")
-            bare_id = raw_id.split("|")[1] if "|" in raw_id else raw_id
+        for item in all_summaries:
+            raw_id = item.get("itemId", "") or item.get("legacyItemId", "")
+            if "|" in raw_id:
+                bare_id = raw_id.split("|")[1]
+            else:
+                bare_id = raw_id
             if bare_id and bare_id not in existing_ebay_item_ids:
                 missing.append(item)
 
