@@ -100,7 +100,7 @@ const PricingModal: React.FC<{
 
         {/* Platform badges */}
         <div className="flex flex-wrap gap-1.5 mb-4">
-          {ssPricing && <span className="badge badge-accent badge-sm">Squarespace</span>}
+          {ssPricing && <span className="badge badge-info badge-sm">Squarespace</span>}
           {ebPricing && <span className="badge badge-warning badge-sm">eBay</span>}
           {ssPricing && ebPricing && <span className="badge badge-success badge-sm">✓ Shared stock</span>}
           {product.needs_sync && <span className="badge badge-info badge-sm">⏳ Sync pending</span>}
@@ -283,7 +283,7 @@ const MergeModal: React.FC<{
                 <div className="font-medium text-sm leading-tight mb-1">{prod.name}</div>
                 <div className="font-mono text-xs text-base-content/40 mb-2">{prod.sku}</div>
                 <div className="flex flex-wrap gap-1">
-                  {ssPr && <span className="badge badge-accent badge-xs">SS £{Number(ssPr.price).toFixed(2)}</span>}
+                  {ssPr && <span className="badge badge-info badge-xs">SS £{Number(ssPr.price).toFixed(2)}</span>}
                   {ebPr && <span className="badge badge-warning badge-xs">eBay £{Number(ebPr.price).toFixed(2)}</span>}
                 </div>
                 <div className="text-xs text-base-content/50 mt-1">
@@ -299,7 +299,7 @@ const MergeModal: React.FC<{
           <div className="font-medium">{keepProd.name}</div>
           <div className="font-mono text-xs text-base-content/40 mb-2">{keepProd.sku}</div>
           <div className="flex flex-wrap gap-1 mb-2">
-            {finalSS && <span className="badge badge-accent badge-sm">Squarespace £{Number(finalSS.price).toFixed(2)}</span>}
+            {finalSS && <span className="badge badge-info badge-sm">Squarespace £{Number(finalSS.price).toFixed(2)}</span>}
             {finalEB && <span className="badge badge-warning badge-sm">eBay £{Number(finalEB.price).toFixed(2)}</span>}
           </div>
           <div className="flex items-center gap-2">
@@ -467,13 +467,22 @@ export const Products: React.FC<ProductsProps> = ({
       )}
 
       {lastMerge && (
-        <div className="alert alert-info py-2 text-sm flex items-center justify-between">
+        <div className="alert alert-info py-2 text-sm flex items-center justify-between gap-2">
           <span>
-            <strong>Last merge:</strong> "{lastMerge.removedName}" was merged into "{lastMerge.keepName}"
+            <strong>Last merge:</strong> &ldquo;{lastMerge.removedName}&rdquo; merged into &ldquo;{lastMerge.keepName}&rdquo;
           </span>
-          <button className="btn btn-ghost btn-xs gap-1" onClick={handleUndoMerge} disabled={busy}>
-            <Undo2 size={12} /> Undo merge
-          </button>
+          <div className="flex items-center gap-1 flex-shrink-0">
+            <button className="btn btn-ghost btn-xs gap-1" onClick={handleUndoMerge} disabled={busy}>
+              <Undo2 size={12} /> Undo
+            </button>
+            <button
+              className="btn btn-ghost btn-xs btn-circle"
+              onClick={() => setLastMerge(null)}
+              title="Dismiss"
+            >
+              <X size={12} />
+            </button>
+          </div>
         </div>
       )}
 
@@ -580,7 +589,7 @@ export const Products: React.FC<ProductsProps> = ({
                     <td className="font-mono text-xs text-base-content/50">{p.sku}</td>
                     <td>
                       <div className="flex flex-wrap gap-1">
-                        {ssPr && <span className="badge badge-accent badge-xs">SS</span>}
+                        {ssPr && <span className="badge badge-info badge-xs">SS</span>}
                         {ebPr && <span className="badge badge-warning badge-xs">EB</span>}
                         {!ssPr && !ebPr && <span className="text-base-content/30 text-xs">—</span>}
                       </div>
