@@ -348,13 +348,14 @@ class SyncEngine:
 
         merged_skus, existing_ebay_item_ids = self._load_blocklists()
 
-        # Pre-load all existing internal_sku values so we can dedup in memory
+        # Pre-load SKUs that already have a channel_listing on eBay — not just variants.
+        # This way variants that exist but have no channel_listing still get processed.
         existing_skus = set()
         try:
-            rows = self.db._request("GET", "/rest/v1/variants",
-                                    params={"select": "internal_sku", "limit": "10000"})
+            rows = self.db._request("GET", "/rest/v1/channel_listings",
+                                    params={"select": "channel_sku", "channel": "eq.ebay", "limit": "10000"})
             for r in rows:
-                s = r.get("internal_sku")
+                s = r.get("channel_sku")
                 if s:
                     existing_skus.add(s)
         except Exception:
