@@ -41,6 +41,7 @@ const PricingModal: React.FC<{
   const [costPrice, setCostPrice] = useState(product.cost_price != null ? String(product.cost_price) : '');
   const [ssPrice, setSsPrice] = useState(ssPricing ? String(Number(ssPricing.price).toFixed(2)) : '');
   const [ebPrice, setEbPrice] = useState(ebPricing ? String(Number(ebPricing.price).toFixed(2)) : '');
+  const [ebListingId, setEbListingId] = useState('');
   const [stockValue, setStockValue] = useState(inv ? String(inv.total_stock) : '0');
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState('');
@@ -59,7 +60,19 @@ const PricingModal: React.FC<{
 
       // Save platform prices — marks needs_sync=true via updatePricing
       if (ssPricing && ssPrice !== '') await updatePricing(ssPricing.id, parseFloat(ssPrice));
-      if (ebPricing && ebPrice !== '') await updatePricing(ebPricing.id, parseFloat(ebPrice));
+      if (ebPricing && ebPrice !== '') {
+        await updatePricing(ebPricing.id, parseFloat(ebPrice));
+      } else if (!ebPricing && ebListingId.trim() && ebPrice !== '') {
+        // Manual link: create a new eBay channel_listing
+        await createPricing({
+          product_id: product.id,
+          platform: 'ebay',
+          price: parseFloat(ebPrice),
+          channel_sku: product.sku || undefined,
+          platform_product_id: ebListingId.trim(),
+          platform_variant_id: product.sku || undefined,
+        });
+      }
 
       // Save stock — marks needs_sync=true via updateInventory
       const newStock = Math.max(0, parseInt(stockValue) || 0);
@@ -185,7 +198,7 @@ const PricingModal: React.FC<{
         <div className="form-control mb-4">
           <label className="label py-1">
             <span className="label-text font-medium">eBay Price</span>
-            {!ebPricing && <span className="label-text-alt text-base-content/40">not listed</span>}
+            {!ebPricing && <span className="label-text-alt text-warning text-xs">not linked — enter listing ID below to add</span>}
           </label>
           <div className="input-group">
             <span>£</span>
@@ -195,9 +208,23 @@ const PricingModal: React.FC<{
               value={ebPrice}
               onChange={e => setEbPrice(e.target.value)}
               step="0.01" min="0"
-              disabled={!ebPricing}
+              placeholder={ebPricing ? '' : '0.00'}
             />
           </div>
+          {!ebPricing && (
+            <div className="mt-2">
+              <input
+                type="text"
+                className="input input-bordered input-sm w-full font-mono"
+                placeholder="eBay listing ID (e.g. 358390779998)"
+                value={ebListingId}
+                onChange={e => setEbListingId(e.target.value)}
+              />
+              <span className="label-text-alt text-base-content/40 text-xs mt-1 block">
+                Enter the 12-digit eBay item ID to link this variant
+              </span>
+            </div>
+          )}
           {ebMargin !== null && (
             <label className="label py-1">
               <span className={`label-text-alt ${ebMargin > 0 ? 'text-success' : 'text-error'}`}>

@@ -254,6 +254,7 @@ export async function createPricing(pricing: {
   product_id: string;   // variant_id
   platform: string;
   price?: number;
+  channel_sku?: string;
   platform_product_id?: string;
   platform_variant_id?: string;
 }): Promise<void> {
@@ -261,11 +262,15 @@ export async function createPricing(pricing: {
     variant_id: pricing.product_id,
     channel: pricing.platform,
     channel_price: pricing.price,
+    channel_sku: pricing.channel_sku,
     channel_product_id: pricing.platform_product_id,
     channel_variant_id: pricing.platform_variant_id,
     updated_at: new Date().toISOString(),
   });
   if (error) throw error;
+
+  // Mark variant needs_sync so hourly job pushes the new listing
+  await markVariantNeedsSync(pricing.product_id);
 }
 
 /**
