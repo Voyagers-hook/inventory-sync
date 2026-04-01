@@ -102,11 +102,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
     setSyncing(true);
     try {
       await updateSetting('manual_sync_requested', 'true');
-      const triggered = await triggerQuickSync();
-      setToast(triggered
-        ? 'Sync triggered — running now (~1 min)'
-        : 'No GitHub token saved — check Settings → GitHub Token'
-      );
+      const result = await triggerQuickSync();
+      if (result.ok) {
+        setToast('Sync triggered — running now (~1 min)');
+      } else if (result.error === 'no_token') {
+        setToast('No GitHub token saved — go to Settings → GitHub Token');
+      } else if (result.error === 'github_401' || result.error === 'github_403') {
+        setToast('GitHub token rejected (needs repo+workflow scope) — check Settings');
+      } else if (result.error === 'github_422') {
+        setToast('GitHub workflow error (422) — check browser console');
+      } else {
+        setToast(`Sync failed (${result.error ?? 'unknown'}) — check browser console`);
+      }
       setTimeout(() => setToast(''), 6000);
     } catch {
       setToast('Error triggering sync — check browser console');

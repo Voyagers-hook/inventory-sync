@@ -628,12 +628,12 @@ export async function fetchSalesTrends(): Promise<SalesTrend[]> {
 
 const GITHUB_REPO = 'Voyagers-hook/inventory-sync';
 
-export async function triggerQuickSync(): Promise<boolean> {
+export async function triggerQuickSync(): Promise<{ ok: boolean; error?: string }> {
   // Read token from Supabase settings at runtime
   const token = await fetchSetting('github_token');
   if (!token) {
     console.error('[triggerQuickSync] No github_token found in settings table');
-    return false;
+    return { ok: false, error: 'no_token' };
   }
 
   try {
@@ -649,13 +649,14 @@ export async function triggerQuickSync(): Promise<boolean> {
         body: JSON.stringify({ ref: 'main' }),
       }
     );
-    if (!res.ok && res.status !== 204) {
-      const body = await res.text().catch(() => '');
-      console.error(`[triggerQuickSync] GitHub API ${res.status}:`, body);
+    if (res.ok || res.status === 204) {
+      return { ok: true };
     }
-    return res.ok || res.status === 204;
+    const body = await res.text().catch(() => '');
+    console.error(`[triggerQuickSync] GitHub API ${res.status}:`, body);
+    return { ok: false, error: `github_${res.status}` };
   } catch (err) {
     console.error('[triggerQuickSync] fetch error:', err);
-    return false;
+    return { ok: false, error: 'network_error' };
   }
 }
