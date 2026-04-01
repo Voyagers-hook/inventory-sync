@@ -139,45 +139,48 @@ class EbayClient:
     # ------------------------------------------------------------------
 
     def _get_all_summary_items(self):
-        """Get ALL active seller listings via Trading API GetSellerList.
+        """Get ALL active seller listings via Trading API GetMyeBaySelling.
+        Uses the ActiveList section which returns every active listing regardless
+        of end date — fixes the bug where GTC listings mid-renewal were skipped.
         Returns items in Browse API-compatible format for _expand_item.
-        Only used for initial import or when user presses Sync Now.
+        Only used for initial import or full catalogue refresh.
         """
         import re as _re
-        from datetime import datetime, timezone, timedelta
 
         items = []
         page_number = 1
         total_pages = 1
 
-        start_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        end_time = (datetime.now(timezone.utc) + timedelta(days=120)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
         while page_number <= total_pages:
             xml_body = (
                 '<?xml version="1.0" encoding="utf-8"?>'
-                '<GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
-                f'<EndTimeFrom>{start_time}</EndTimeFrom>'
-                f'<EndTimeTo>{end_time}</EndTimeTo>'
-                '<GranularityLevel>Coarse</GranularityLevel>'
+                '<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+                '<ActiveList>'
+                '<Include>true</Include>'
                 '<IncludeVariations>true</IncludeVariations>'
                 '<Pagination>'
                 '<EntriesPerPage>200</EntriesPerPage>'
                 f'<PageNumber>{page_number}</PageNumber>'
                 '</Pagination>'
-                '</GetSellerListRequest>'
+                '</ActiveList>'
+                '</GetMyeBaySellingRequest>'
             )
             try:
-                resp_text = self._trading_api_call("GetSellerList", xml_body)
+                resp_text = self._trading_api_call("GetMyeBaySelling", xml_body)
             except Exception as e:
-                logger.error("GetSellerList page %d failed: %s", page_number, e)
+                logger.error("GetMyeBaySelling page %d failed: %s", page_number, e)
                 break
 
-            tp_match = _re.search(r'<TotalNumberOfPages>(\d+)</TotalNumberOfPages>', resp_text)
+            # Total pages is inside <ActiveList><PaginationResult>
+            tp_match = _re.search(
+                r'<ActiveList>.*?<TotalNumberOfPages>(\d+)</TotalNumberOfPages>',
+                resp_text, _re.DOTALL
+            )
             if tp_match:
                 total_pages = int(tp_match.group(1))
 
             item_blocks = _re.findall(r'<Item>(.*?)</Item>', resp_text, _re.DOTALL)
+            page_items = 0
             for block in item_blocks:
                 item_id_m = _re.search(r'<ItemID>(\d+)</ItemID>', block)
                 title_m = _re.search(r'<Title>(.*?)</Title>', block)
@@ -191,11 +194,13 @@ class EbayClient:
                     "legacyItemId": legacy_id,
                     "title": title,
                 })
+                page_items += 1
 
-            logger.info("GetSellerList page %d/%d: %d items", page_number, total_pages, len(item_blocks))
+            logger.info("GetMyeBaySelling page %d/%d: %d items (total so far: %d)",
+                        page_number, total_pages, page_items, len(items))
             page_number += 1
 
-        logger.info("GetSellerList returned %d total listing entries", len(items))
+        logger.info("GetMyeBaySelling returned %d total active listing entries", len(items))
         return items
 
     def get_new_listings(self, since_timestamp):
