@@ -56,22 +56,20 @@ class SyncEngine:
 
         return merged_skus, existing_ebay_item_ids
 
-    def _save_ebay_item(self, item, merged_skus, existing_ebay_item_ids):
+    def _save_ebay_item(self, item, merged_skus, existing_ebay_item_ids, existing_skus=None):
         """Save a single eBay item to DB. Returns 1 if new product created, 0 otherwise."""
         sku = item.get("sku")
         if not sku:
             return 0
 
-        raw_item_id = item.get("item_id", sku)
-        bare_id = raw_item_id.split("|")[1] if "|" in raw_item_id else raw_item_id
-
-        # Skip if already linked to another product (merged) and no product exists for this SKU
-        if bare_id in existing_ebay_item_ids and not self.db.get_product_by_sku(sku):
-            logger.info(f"Skipping eBay item {sku} - already linked via channel_listings (merged)")
-            return 0
-
         if sku in merged_skus:
             return 0
+
+        # Fast in-memory check: if we have a pre-loaded SKU set, use it; otherwise hit DB
+        if existing_skus is not None:
+            if sku in existing_skus:
+                return 0  # already in DB, skip
+        
 
         name = item.get("title", "") or "Unnamed"
         if item.get("is_variant") and item.get("aspects"):
@@ -101,6 +99,8 @@ class SyncEngine:
                 self.db.upsert_inventory({"variant_id": product_id,
                                           "product_id": existing.get("product_id"),
                                           "total_stock": item.get("quantity", 0)})
+                if existing_skus is not None:
+                    existing_skus.add(sku)  # keep in-memory set up to date
             variation_sku = item.get("variation_sku") if item.get("is_variant") else None
             self.db.upsert_price({
                 "product_id": product_id,   # shim translates to variant_id
@@ -110,7 +110,6 @@ class SyncEngine:
                 "platform_product_id": item.get("item_id", sku),
                 "platform_variant_id": variation_sku,
             })
-            existing_ebay_item_ids.add(bare_id)
 
         return 1 if is_new else 0
 
@@ -336,16 +335,30 @@ class SyncEngine:
     # ─── Incremental New Listings (Hourly) ───────────────────────────────────
 
     def sync_missing_ebay_listings(self):
-        """Fetch ALL eBay listing summaries, compare against DB, expand and import only missing ones.
+        """Fetch ALL eBay listings, expand every one, and insert any variants not already in DB.
 
-        Calls _get_all_summary_items() which returns raw summary dicts with key "itemId" (camelCase).
-        Does NOT call get_inventory_items() — that returns already-expanded items and would
-        cause _expand_item to be called with the wrong key names.
+        Uses a pre-loaded set of all existing variant SKUs for fast in-memory dedup —
+        no DB call per variant. Handles the case where a listing was partially imported
+        (e.g. some variants had custom SKUs, others didn't) by always checking ALL variants
+        of every listing against the existing SKU set.
+
         Called every hourly sync and on every Sync Now press.
         """
         logger.info("Checking for missing eBay listings (full diff against DB)...")
 
         merged_skus, existing_ebay_item_ids = self._load_blocklists()
+
+        # Pre-load all existing internal_sku values so we can dedup in memory
+        existing_skus = set()
+        try:
+            rows = self.db._request("GET", "/rest/v1/variants",
+                                    params={"select": "internal_sku", "limit": "10000"})
+            for r in rows:
+                s = r.get("internal_sku")
+                if s:
+                    existing_skus.add(s)
+        except Exception:
+            pass  # fall back to per-item DB checks if this fails
 
         # Get raw summary items (itemId, legacyItemId, title) — NOT expanded yet
         all_summaries = self.ebay._get_all_summary_items()
@@ -353,25 +366,9 @@ class SyncEngine:
             logger.info("No eBay listings returned")
             return 0
 
-        # Filter to only items whose bare eBay ID is NOT already in the DB
-        # all_summaries items use camelCase "itemId" key e.g. "v1|358337889902|0"
-        missing = []
-        for item in all_summaries:
-            raw_id = item.get("itemId", "") or item.get("legacyItemId", "")
-            if "|" in raw_id:
-                bare_id = raw_id.split("|")[1]
-            else:
-                bare_id = raw_id
-            if bare_id and bare_id not in existing_ebay_item_ids:
-                missing.append(item)
-
-        if not missing:
-            logger.info("All %d eBay listings already in DB — nothing to import", len(all_summaries))
-            return 0
-
         logger.info(
-            "Found %d missing eBay listing(s) out of %d total — expanding...",
-            len(missing), len(all_summaries)
+            "Expanding all %d eBay listing(s) to find missing variants...",
+            len(all_summaries)
         )
 
         results = []
@@ -379,7 +376,7 @@ class SyncEngine:
         lock = threading.Lock()
 
         with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(self.ebay._expand_item, item, seen_groups, lock) for item in missing]
+            futures = [executor.submit(self.ebay._expand_item, item, seen_groups, lock) for item in all_summaries]
             for future in as_completed(futures):
                 try:
                     entries = future.result()
@@ -390,7 +387,7 @@ class SyncEngine:
 
         added = 0
         for item in results:
-            added += self._save_ebay_item(item, merged_skus, existing_ebay_item_ids)
+            added += self._save_ebay_item(item, merged_skus, existing_ebay_item_ids, existing_skus)
 
         logger.info("Missing listings sync: %d new product(s) added", added)
         return added
