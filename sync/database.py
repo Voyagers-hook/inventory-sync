@@ -81,6 +81,29 @@ class Database:
                    payload={"key": key, "value": str(value) if value is not None else None},
                    headers_extra={"Prefer": "resolution=merge-duplicates,return=representation"})
 
+    def get_all_variants(self):
+        """Fetch ALL variants in one call. Returns dict keyed by internal_sku."""
+        rows = self._rest("GET", "variants", params={"select": "*", "limit": "10000"})
+        return {r["internal_sku"]: r for r in rows if r.get("internal_sku")}
+
+    def get_all_channel_listings(self):
+        """Fetch ALL channel_listings in one call. Returns list."""
+        return self._rest("GET", "channel_listings", params={"select": "*", "limit": "10000"})
+
+    def bulk_insert_rows(self, table: str, rows: list, batch_size: int = 500):
+        """Bulk insert rows in batches. Uses return=minimal for speed."""
+        if not rows:
+            return
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i:i + batch_size]
+            try:
+                self._rest("POST", table, payload=batch,
+                           headers_extra={"Prefer": "return=minimal"})
+                logger.info(f"Bulk insert {table}: {len(batch)} rows (batch {i // batch_size + 1})")
+            except Exception as e:
+                logger.error(f"Bulk insert {table} batch {i // batch_size + 1} failed: {e}")
+                raise
+
     def count_products(self):
         rows = self._rest("GET", "variants", params={"select": "id", "limit": "1"})
         # Use count header via HEAD request for accuracy
