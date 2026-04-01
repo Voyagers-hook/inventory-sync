@@ -17,7 +17,7 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
-import type { Product, Inventory, Pricing, Order, SyncLog } from '../types';
+import type { Product, Inventory, Pricing, Order, SyncLog, SalesTrend, Setting } from '../types';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
@@ -580,4 +580,61 @@ export async function setSetting(key: string, value: string): Promise<void> {
     .from('settings')
     .upsert({ key, value }, { onConflict: 'key' });
   if (error) throw error;
+}
+
+// ─── Settings (array fetch + update) ─────────────────────────────────────────
+
+export async function fetchSettings(): Promise<Setting[]> {
+  const { data, error } = await supabase
+    .from('settings')
+    .select('key, value');
+  if (error) throw error;
+  return (data || []).map((row: any) => ({
+    key: row.key,
+    value: row.value ?? '',
+  }));
+}
+
+export async function updateSetting(key: string, value: string): Promise<void> {
+  const { error } = await supabase
+    .from('settings')
+    .upsert({ key, value }, { onConflict: 'key' });
+  if (error) throw error;
+}
+
+// ─── Sales Trends ─────────────────────────────────────────────────────────────
+
+export async function fetchSalesTrends(): Promise<SalesTrend[]> {
+  const { data, error } = await supabase
+    .from('sales_trends')
+    .select('*')
+    .order('date', { ascending: false })
+    .limit(1000);
+  if (error) throw error;
+  return data || [];
+}
+
+// ─── Quick Sync (GitHub Actions workflow_dispatch) ────────────────────────────
+
+export async function triggerQuickSync(): Promise<boolean> {
+  const token = import.meta.env.VITE_GITHUB_TOKEN as string;
+  const repo = import.meta.env.VITE_GITHUB_REPO as string;
+  if (!token || !repo) return false;
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${repo}/actions/workflows/sync-quick.yml/dispatches`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ ref: 'main' }),
+      }
+    );
+    return res.ok || res.status === 204;
+  } catch {
+    return false;
+  }
 }

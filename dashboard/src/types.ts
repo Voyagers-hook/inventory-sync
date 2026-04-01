@@ -113,6 +113,11 @@ export interface SalesTrend {
   revenue: number;
 }
 
+export interface Setting {
+  key: string;
+  value: string;
+}
+
 export interface SyncLog {
   id: string;
   sync_type: string;
