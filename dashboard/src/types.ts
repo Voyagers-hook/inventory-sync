@@ -1,4 +1,6 @@
 // ─── Core domain types — v2 ──────────────────────────────────────────────────
+
+export type TabName = 'dashboard' | 'orders' | 'products' | 'sales' | 'trends' | 'settings';
 //
 // Products: id = variant_id (the operational key for stock + pricing).
 //           product_id = the parent products.id (grouping key for multi-variant products).

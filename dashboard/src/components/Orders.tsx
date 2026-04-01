@@ -21,7 +21,7 @@ function PlatformBadge({ platform }: { platform: string }) {
   return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">{platform || '—'}</span>;
 }
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status }: { status: string | undefined }) {
   const s = (status || 'PENDING').toUpperCase();
   if (s === 'PENDING' || s === 'NOT_STARTED')
     return <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-50 text-orange-600 border border-orange-100">Pending</span>;
@@ -34,7 +34,7 @@ function StatusBadge({ status }: { status: string }) {
 
 const CARRIERS = ['Royal Mail', 'DPD', 'Hermes/Evri', 'DHL', 'UPS', 'FedEx', 'Yodel', 'ParcelForce', 'Other'];
 
-const CopyButton: React.FC<{ text: string }> = ({ text }) => {
+const CopyButton: React.FC<{ text: string | undefined }> = ({ text }) => {
   const [copied, setCopied] = useState(false);
   const handleCopy = useCallback(async () => {
     if (!text) return;

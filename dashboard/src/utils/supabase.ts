@@ -16,6 +16,7 @@
  *   Sync Now    → triggers GitHub Actions workflow_dispatch
  */
 
+/// <reference types="vite/client" />
 import { createClient } from '@supabase/supabase-js';
 import type { Product, Inventory, Pricing, Order, SyncLog, SalesTrend, Setting } from '../types';
 
@@ -579,6 +580,16 @@ export async function setSetting(key: string, value: string): Promise<void> {
   const { error } = await supabase
     .from('settings')
     .upsert({ key, value }, { onConflict: 'key' });
+  if (error) throw error;
+}
+
+// ─── Orders ───────────────────────────────────────────────────────────────────
+
+export async function updateOrder(id: string, updates: Partial<import('../types').Order>): Promise<void> {
+  const { error } = await supabase
+    .from('orders')
+    .update(updates)
+    .eq('id', id);
   if (error) throw error;
 }
 
