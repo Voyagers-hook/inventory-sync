@@ -366,12 +366,12 @@ class SyncEngine:
                 missing.append(item)
 
         if not missing:
-            logger.info("All %d eBay listings already in DB — nothing to import", len(all_raw))
+            logger.info("All %d eBay listings already in DB — nothing to import", len(all_summaries))
             return 0
 
         logger.info(
             "Found %d missing eBay listing(s) out of %d total — expanding...",
-            len(missing), len(all_raw)
+            len(missing), len(all_summaries)
         )
 
         results = []
