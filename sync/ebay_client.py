@@ -262,6 +262,82 @@ class EbayClient:
         logger.info("GetSellerList new listings since %s: %d found", since_timestamp, len(items))
         return items
 
+    def _expand_item_via_trading(self, raw_item, seen_groups, lock):
+        """Fallback for items where Browse API returns 404 — use Trading API GetItem."""
+        import re as _re
+        legacy_id = raw_item.get("legacyItemId", "")
+        if not legacy_id:
+            return [{
+                "sku": raw_item.get("itemId", ""),
+                "title": raw_item.get("title", ""),
+                "price": 0.0, "quantity": 0,
+                "item_id": raw_item.get("itemId", ""),
+                "legacy_item_id": "", "group_id": None, "aspects": {}, "is_variant": False,
+            }]
+        try:
+            xml_body = (
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+                f'<ItemID>{legacy_id}</ItemID>'
+                '<DetailLevel>ReturnAll</DetailLevel>'
+                '</GetItemRequest>'
+            )
+            resp_text = self._trading_api_call("GetItem", xml_body)
+        except Exception as e:
+            logger.warning("Trading API fallback also failed for %s: %s — using basic info", legacy_id, e)
+            return [{
+                "sku": legacy_id, "title": raw_item.get("title", ""),
+                "price": 0.0, "quantity": 0,
+                "item_id": raw_item.get("itemId", ""),
+                "legacy_item_id": legacy_id, "group_id": None, "aspects": {}, "is_variant": False,
+            }]
+
+        title_m = _re.search(r'<Title>(.*?)</Title>', resp_text)
+        title = title_m.group(1) if title_m else raw_item.get("title", "")
+        sku_m = _re.search(r'<SKU>(.*?)</SKU>', resp_text)
+        sku = sku_m.group(1) if sku_m else legacy_id
+        price_m = _re.search(r'<CurrentPrice[^>]*>([\d.]+)</CurrentPrice>', resp_text)
+        price = float(price_m.group(1)) if price_m else 0.0
+
+        variations = _re.findall(r'<Variation>(.*?)</Variation>', resp_text, _re.DOTALL)
+        if variations:
+            group_id = f"legacy_{legacy_id}"
+            with lock:
+                if group_id in seen_groups:
+                    return []
+                seen_groups.add(group_id)
+            entries = []
+            for i, var in enumerate(variations):
+                var_sku_m = _re.search(r'<SKU>(.*?)</SKU>', var)
+                var_qty_m = _re.search(r'<Quantity>(\d+)</Quantity>', var)
+                var_qty_sold_m = _re.search(r'<QuantitySold>(\d+)</QuantitySold>', var)
+                var_price_m = _re.search(r'<StartPrice[^>]*>([\d.]+)</StartPrice>', var)
+                var_sku = var_sku_m.group(1) if var_sku_m else f"{legacy_id}-v{i}"
+                var_qty = max(0, (int(var_qty_m.group(1)) if var_qty_m else 0)
+                              - (int(var_qty_sold_m.group(1)) if var_qty_sold_m else 0))
+                var_price = float(var_price_m.group(1)) if var_price_m else price
+                specs = dict(_re.findall(
+                    r'<NameValueList><Name>(.*?)</Name><Value>(.*?)</Value></NameValueList>', var))
+                entries.append({
+                    "sku": var_sku or f"{legacy_id}-v{i}", "title": title,
+                    "price": var_price, "quantity": var_qty,
+                    "item_id": f"v1|{legacy_id}|0", "legacy_item_id": legacy_id,
+                    "group_id": group_id, "aspects": specs,
+                    "is_variant": True, "variation_sku": var_sku,
+                })
+            return entries
+        else:
+            qty_m = _re.search(r'<Quantity>(\d+)</Quantity>', resp_text)
+            qty_sold_m = _re.search(r'<QuantitySold>(\d+)</QuantitySold>', resp_text)
+            qty = max(0, (int(qty_m.group(1)) if qty_m else 0)
+                      - (int(qty_sold_m.group(1)) if qty_sold_m else 0))
+            return [{
+                "sku": sku or legacy_id, "title": title,
+                "price": price, "quantity": qty,
+                "item_id": raw_item.get("itemId", ""),
+                "legacy_item_id": legacy_id, "group_id": None, "aspects": {}, "is_variant": False,
+            }]
+
     def _expand_item(self, raw_item, seen_groups, lock):
         """Expand a single item into variant entries. Returns list of dicts."""
         try:
@@ -270,8 +346,8 @@ class EbayClient:
                 f"https://api.ebay.com/buy/browse/v1/item/{urllib.parse.quote(item_id)}"
             )
         except Exception as e:
-            logger.warning("Could not fetch item %s: %s", raw_item.get("itemId"), e)
-            return []
+            logger.warning("Could not fetch item %s via Browse API — falling back to Trading API (%s)", raw_item.get("itemId"), e)
+            return self._expand_item_via_trading(raw_item, seen_groups, lock)
 
         group_info = detail.get("primaryItemGroup")
         if group_info:
