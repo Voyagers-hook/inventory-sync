@@ -96,11 +96,13 @@ const PricingModal: React.FC<{
         {/* Header */}
         <div className="flex items-start justify-between mb-4">
           <div>
-            <h3 className="font-bold text-lg">{product.name}</h3>
+            <h3 className="font-bold text-lg">
+              {product.name}
+              {(product.option1 || product.option2) && (
+                <span className="text-primary"> - {product.option1}{product.option2 ? ` / ${product.option2}` : ''}</span>
+              )}
+            </h3>
             <div className="text-xs text-base-content/50 font-mono mt-0.5">{product.sku}</div>
-            {product.option1 && (
-              <div className="text-xs text-base-content/60 mt-0.5">{product.option1}{product.option2 ? ` / ${product.option2}` : ''}</div>
-            )}
           </div>
           <button className="btn btn-ghost btn-sm btn-circle" onClick={onClose}><X size={16} /></button>
         </div>
@@ -696,11 +698,15 @@ export const Products: React.FC<ProductsProps> = ({
                           ? <Link size={12} className="text-success flex-shrink-0" />
                           : <Unlink size={12} className="text-base-content/20 flex-shrink-0" />
                         }
-                        <span className="font-medium text-sm leading-tight">{p.name}</span>
+                        <span className="font-medium text-sm leading-tight">
+                          {p.name}
+                          {(p.option1 || p.option2) && (
+                            <span className="text-primary font-semibold">
+                              {' - '}{p.option1}{p.option2 ? ` / ${p.option2}` : ''}
+                            </span>
+                          )}
+                        </span>
                       </div>
-                      {p.option1 && (
-                        <div className="text-xs text-base-content/50 ml-4 mt-0.5">{p.option1}{p.option2 ? ` / ${p.option2}` : ''}</div>
-                      )}
                     </td>
                     <td className="font-mono text-xs text-base-content/50">{p.sku}</td>
                     <td>
