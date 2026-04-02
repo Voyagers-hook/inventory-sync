@@ -355,6 +355,67 @@ class SyncEngine:
         logger.info(f"Full catalogue sync complete: {total_new} new products added")
         return total_new
 
+
+    def sync_new_ebay_listings_only(self):
+        """Incremental eBay check — only fetches listings created since last sync.
+
+        Unlike sync_missing_ebay_listings() which re-expands ALL listings (causing
+        duplicates when SKU formats change), this only processes truly NEW listings
+        using eBay's StartTimeFrom filter.
+        """
+        last_sync = self.db.get_setting("last_full_sync")
+        if not last_sync:
+            last_sync = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        logger.info(f"Checking for new eBay listings since {last_sync}...")
+        new_summaries = self.ebay.get_new_listings(last_sync)
+        if not new_summaries:
+            logger.info("No new eBay listings found")
+            return 0
+
+        logger.info(f"Found {len(new_summaries)} new eBay listing(s) to process")
+
+        merged_skus, existing_ebay_item_ids = self._load_blocklists()
+
+        # Pre-load existing SKUs for dedup
+        existing_skus = set()
+        try:
+            rows = self.db._rest("GET", "channel_listings",
+                                 params={"select": "channel_sku,channel_product_id",
+                                         "channel": "eq.ebay", "limit": "10000"})
+            for r in rows:
+                s = r.get("channel_sku")
+                pid = r.get("channel_product_id", "")
+                bare_id = pid.split("|")[1] if pid and "|" in pid else pid
+                if s:
+                    existing_skus.add((bare_id, s))
+        except Exception as e:
+            logger.warning("Could not pre-load existing_skus: %s", e)
+
+        import threading
+        results = []
+        seen_groups = set()
+        lock = threading.Lock()
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(self.ebay._expand_item, item, seen_groups, lock)
+                       for item in new_summaries]
+            for future in as_completed(futures):
+                try:
+                    entries = future.result()
+                    if entries:
+                        results.extend(entries)
+                except Exception as e:
+                    logger.warning("Listing expansion error: %s", e)
+
+        added = 0
+        for item in results:
+            added += self._save_ebay_item(item, merged_skus, existing_ebay_item_ids, existing_skus)
+
+        logger.info(f"New listings sync: {added} new product(s) added")
+        return added
+
     # ─── Incremental New Listings (Hourly) ───────────────────────────────────
 
     def sync_missing_ebay_listings(self):
@@ -769,7 +830,7 @@ class SyncEngine:
           - OR more than 24 hours have passed since the last catalogue sync
             (picks up any new Squarespace OR eBay products added since then)
 
-        In between hourly runs: fast eBay-only incremental check for new listings.
+        In between hourly runs: only check for NEWLY LISTED eBay items since last sync.
         Skips entirely if a manual Sync Now ran within the last 30 minutes.
         """
         total = 0
@@ -801,21 +862,36 @@ class SyncEngine:
             except Exception:
                 pass
 
-        if product_count == 0:
-            # First ever run — do full catalogue to get Squarespace products too
-            logger.info("First run — importing full catalogue from both platforms...")
+        if product_count == 0 or hours_since_catalogue >= 24:
+            # Full catalogue sync (first run or daily refresh)
+            reason = "First run" if product_count == 0 else "24h refresh"
+            logger.info(f"{reason} — importing full catalogue from both platforms...")
             total += self.sync_product_catalogue()
             self.db.set_setting("last_catalogue_sync", now.strftime("%Y-%m-%dT%H:%M:%SZ"))
         else:
-            # Incremental: find any eBay listings not yet in DB and add them
-            logger.info("Incremental eBay diff check...")
-            total += self.sync_missing_ebay_listings()
+            # Incremental: only check for NEWLY LISTED eBay items since last sync
+            # This prevents the duplicate bug where re-expanding ALL listings
+            # caused items with changed SKU formats to be reimported.
+            logger.info("Incremental new-listings-only check...")
+            total += self.sync_new_ebay_listings_only()
 
         last = self.db.get_setting("last_full_sync")
         since = last if last else (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         total += self.process_squarespace_orders(since)
         total += self.process_ebay_orders(since)
+
+        # Fix broken eBay variant metadata BEFORE pushing stock/prices
+        try:
+            self.refresh_ebay_variant_metadata()
+        except Exception as e:
+            logger.warning(f"refresh_ebay_variant_metadata failed (non-fatal): {e}")
+
+        # Fix broken eBay variant metadata BEFORE pushing stock/prices
+        try:
+            self.refresh_ebay_variant_metadata()
+        except Exception as e:
+            logger.warning(f"refresh_ebay_variant_metadata failed (non-fatal): {e}")
 
         # Push queued stock + price changes (needs_sync=TRUE variants)
         total += self.sync_pending_variants()
@@ -999,8 +1075,10 @@ class SyncEngine:
         # Fix any broken variant metadata (positional -vN IDs → real SKU/aspects)
         count += self.refresh_ebay_variant_metadata()
 
-        # Always check for any eBay listings not yet in DB
-        count += self.sync_missing_ebay_listings()
+        # Full catalogue refresh (both platforms) — clean reimport with proper dedup
+        count += self.sync_product_catalogue()
+        self.db.set_setting("last_catalogue_sync",
+                            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
         last = self.db.get_setting("last_full_sync")
         since = last if last else (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
