@@ -616,13 +616,8 @@ export async function updateSetting(key: string, value: string): Promise<void> {
 // ─── Sales Trends ─────────────────────────────────────────────────────────────
 
 export async function fetchSalesTrends(): Promise<SalesTrend[]> {
-  const { data, error } = await supabase
-    .from('sales_trends')
-    .select('*')
-    .order('date', { ascending: false })
-    .limit(1000);
-  if (error) throw error;
-  return data || [];
+  // sales_trends table removed — Trends component derives data from orders directly
+  return [];
 }
 
 // ─── Quick Sync (GitHub Actions workflow_dispatch) ────────────────────────────
