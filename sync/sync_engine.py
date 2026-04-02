@@ -841,14 +841,26 @@ class SyncEngine:
         """
         import json, re
 
-        # Find all eBay channel_listings with positional -vN channel_variant_ids
+        # Find all eBay channel_listings that need fixing:
+        # 1. Positional -vN channel_variant_ids (need full fix)
+        # 2. JSON channel_variant_ids where the variant's option1 is still NULL (need option1 fix only)
         all_listings = self.db.get_all_channel_listings()
+        
+        # Load all variant option1 values in one query
+        all_variants = self.db._rest("GET", "variants", {"select": "id,option1", "limit": "2000"})
+        variant_option1 = {v["id"]: v.get("option1") for v in (all_variants or [])}
+        
         broken = []
         for cl in all_listings:
             if cl.get("channel") != "ebay":
                 continue
             cvid = cl.get("channel_variant_id") or ""
+            vid = cl.get("variant_id")
+            # Broken positional placeholder
             if re.match(r'^\d+-v\d+$', cvid) or re.match(r'^v1\|\d+\|\d+-v\d+$', cvid):
+                broken.append(cl)
+            # Already has JSON cvid but variant option1 is still NULL
+            elif cvid.startswith("{") and vid and not variant_option1.get(vid):
                 broken.append(cl)
 
         if not broken:
@@ -882,10 +894,22 @@ class SyncEngine:
                 continue
 
             # Match DB listings to eBay variations by position or SKU
-            # First try matching by existing internal_sku on the variant
             for cl in listings:
                 variant_id = cl.get("variant_id")
                 channel_sku = cl.get("channel_sku", "")
+                
+                # Fast path: if channel_variant_id is already JSON, just fix option1
+                cvid_existing = cl.get("channel_variant_id", "")
+                if cvid_existing.startswith("{") and variant_id:
+                    try:
+                        aspects = json.loads(cvid_existing)
+                        option1 = " / ".join(v for v in aspects.values() if v and not str(v).startswith("_"))
+                        if option1:
+                            self.db._patch("variants", {"id": f"eq.{variant_id}"}, {"option1": option1})
+                            fixed += 1
+                    except Exception as e:
+                        logger.error("Failed to fix option1 from existing JSON for %s: %s", variant_id, e)
+                    continue
                 matched_var = None
 
                 # Try matching by channel_sku
@@ -945,15 +969,10 @@ class SyncEngine:
                     logger.error("Failed to update channel_listing %s: %s", cl["id"], e)
                     continue
 
-                # Update variant option1 and name
+                # Update variant option1 (name column is on products, not variants)
                 if variant_id and option1:
                     try:
-                        base_title = matched_var.get("title", "")
-                        new_name = f"{base_title} - {option1}" if base_title else None
-                        patch = {"option1": option1}
-                        if new_name:
-                            patch["name"] = new_name
-                        self.db._patch("variants", {"id": f"eq.{variant_id}"}, patch)
+                        self.db._patch("variants", {"id": f"eq.{variant_id}"}, {"option1": option1})
                     except Exception as e:
                         logger.error("Failed to update variant %s option1: %s", variant_id, e)
 
