@@ -828,6 +828,142 @@ class SyncEngine:
         self.db.set_setting("last_full_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         return total
 
+    def refresh_ebay_variant_metadata(self):
+        """Fix broken channel_variant_id and option1 for multi-variant eBay listings.
+
+        Finds variants whose channel_variant_id looks like '<itemid>-vN' (positional placeholder)
+        and re-fetches actual variation data from eBay to set correct values.
+
+        For variants WITH a custom SKU on eBay: channel_variant_id = the SKU string
+        For variants WITHOUT a custom SKU: channel_variant_id = JSON dict of variation specifics
+            e.g. '{"Colour": "Red"}' — used by update_inventory_quantity/update_offer_price
+        Also sets option1 on the variant for dashboard display.
+        """
+        import json, re
+
+        # Find all eBay channel_listings with positional -vN channel_variant_ids
+        all_listings = self.db.get_all_channel_listings()
+        broken = []
+        for cl in all_listings:
+            if cl.get("channel") != "ebay":
+                continue
+            cvid = cl.get("channel_variant_id") or ""
+            if re.match(r'^\d+-v\d+$', cvid) or re.match(r'^v1\|\d+\|\d+-v\d+$', cvid):
+                broken.append(cl)
+
+        if not broken:
+            logger.info("refresh_ebay_variant_metadata: no broken variants found")
+            return 0
+
+        logger.info("refresh_ebay_variant_metadata: %d broken channel_variant_ids to fix", len(broken))
+
+        # Group by eBay item ID (legacy_id)
+        by_item = {}
+        for cl in broken:
+            cpid = cl.get("channel_product_id", "")
+            # Extract legacy item ID from v1|<id>|0 format
+            if "|" in cpid:
+                legacy_id = cpid.split("|")[1]
+            else:
+                legacy_id = cpid
+            if legacy_id:
+                by_item.setdefault(legacy_id, []).append(cl)
+
+        fixed = 0
+        for legacy_id, listings in by_item.items():
+            try:
+                variations = self.ebay.get_item_variations(legacy_id)
+            except Exception as e:
+                logger.warning("Failed to fetch variations for %s: %s", legacy_id, e)
+                continue
+
+            if not variations:
+                logger.debug("No variations returned for %s — may be single item", legacy_id)
+                continue
+
+            # Match DB listings to eBay variations by position or SKU
+            # First try matching by existing internal_sku on the variant
+            for cl in listings:
+                variant_id = cl.get("variant_id")
+                channel_sku = cl.get("channel_sku", "")
+                matched_var = None
+
+                # Try matching by channel_sku
+                if channel_sku:
+                    for var in variations:
+                        if var.get("sku") == channel_sku:
+                            matched_var = var
+                            break
+
+                # Try matching by internal_sku on the variant
+                if not matched_var and variant_id:
+                    # Get the variant's internal_sku
+                    vdata = self.db.get_product_by_id(variant_id)
+                    if vdata:
+                        isk = vdata.get("internal_sku", "")
+                        for var in variations:
+                            if var.get("sku") and var["sku"] == isk:
+                                matched_var = var
+                                break
+
+                # Fallback: match by position from the -vN suffix
+                if not matched_var:
+                    cvid = cl.get("channel_variant_id", "")
+                    pos_m = re.search(r'-v(\d+)$', cvid)
+                    if pos_m:
+                        pos = int(pos_m.group(1))
+                        if pos < len(variations):
+                            matched_var = variations[pos]
+
+                if not matched_var:
+                    logger.warning("Could not match variant %s to any eBay variation on %s",
+                                   cl.get("id"), legacy_id)
+                    continue
+
+                # Determine the correct channel_variant_id
+                aspects = matched_var.get("aspects", {})
+                ebay_sku = matched_var.get("sku")
+
+                if ebay_sku:
+                    new_cvid = ebay_sku
+                elif aspects:
+                    new_cvid = json.dumps(aspects, separators=(",", ":"))
+                else:
+                    logger.warning("Variation on %s has neither SKU nor aspects — skipping", legacy_id)
+                    continue
+
+                # Build option1 label from aspects
+                option1 = " / ".join(v for v in aspects.values() if v and not v.startswith("_")) if aspects else None
+
+                # Update channel_listing
+                try:
+                    self.db._patch("channel_listings",
+                                   {"id": f"eq.{cl['id']}"},
+                                   {"channel_variant_id": new_cvid,
+                                    "channel_sku": ebay_sku or cl.get("channel_sku")})
+                except Exception as e:
+                    logger.error("Failed to update channel_listing %s: %s", cl["id"], e)
+                    continue
+
+                # Update variant option1 and name
+                if variant_id and option1:
+                    try:
+                        base_title = matched_var.get("title", "")
+                        new_name = f"{base_title} - {option1}" if base_title else None
+                        patch = {"option1": option1}
+                        if new_name:
+                            patch["name"] = new_name
+                        self.db._patch("variants", {"id": f"eq.{variant_id}"}, patch)
+                    except Exception as e:
+                        logger.error("Failed to update variant %s option1: %s", variant_id, e)
+
+                fixed += 1
+                logger.debug("Fixed variant %s: channel_variant_id=%s, option1=%s",
+                             variant_id, new_cvid, option1)
+
+        logger.info("refresh_ebay_variant_metadata: fixed %d/%d broken variants", fixed, len(broken))
+        return fixed
+
     def run_quick_check(self):
         """Triggered by Sync Now button: full catalogue refresh + orders + queues.
         Always does a complete re-fetch of all listings when manually triggered.
@@ -840,6 +976,9 @@ class SyncEngine:
         count += self.push_pending_tracking()
         count += self.sync_pending_variants()
         count += self.sync_pending_price_changes()
+
+        # Fix any broken variant metadata (positional -vN IDs → real SKU/aspects)
+        count += self.refresh_ebay_variant_metadata()
 
         # Always check for any eBay listings not yet in DB
         count += self.sync_missing_ebay_listings()

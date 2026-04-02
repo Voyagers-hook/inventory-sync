@@ -565,8 +565,54 @@ class EbayClient:
             body = e.read().decode()
             raise RuntimeError(f"Trading API {call_name} failed {e.code}: {body[:300]}")
 
+    def get_item_variations(self, legacy_id):
+        """Fetch variation details for a multi-variant listing via Trading API.
+        Returns list of dicts: [{sku, aspects, price, quantity}, ...] or [] for single items.
+        """
+        import re as _re
+        xml_body = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+            f'<ItemID>{legacy_id}</ItemID>'
+            '<DetailLevel>ReturnAll</DetailLevel>'
+            '<IncludeVariations>true</IncludeVariations>'
+            '</GetItemRequest>'
+        )
+        try:
+            resp_text = self._trading_api_call("GetItem", xml_body)
+        except Exception as e:
+            logger.warning("get_item_variations failed for %s: %s", legacy_id, e)
+            return []
+
+        title_m = _re.search(r'<Title>(.*?)</Title>', resp_text)
+        title = title_m.group(1) if title_m else ""
+
+        variations = _re.findall(r'<Variation>(.*?)</Variation>', resp_text, _re.DOTALL)
+        if not variations:
+            return []
+
+        results = []
+        for var in variations:
+            var_sku_m = _re.search(r'<SKU>(.*?)</SKU>', var)
+            var_qty_m = _re.search(r'<Quantity>(\d+)</Quantity>', var)
+            var_qty_sold_m = _re.search(r'<QuantitySold>(\d+)</QuantitySold>', var)
+            var_price_m = _re.search(r'<StartPrice[^>]*>([\d.]+)</StartPrice>', var)
+            specs = dict(_re.findall(
+                r'<NameValueList><Name>(.*?)</Name><Value>(.*?)</Value></NameValueList>', var))
+            results.append({
+                "sku": var_sku_m.group(1) if var_sku_m else None,
+                "aspects": specs,
+                "price": float(var_price_m.group(1)) if var_price_m else 0.0,
+                "quantity": max(0, (int(var_qty_m.group(1)) if var_qty_m else 0)
+                              - (int(var_qty_sold_m.group(1)) if var_qty_sold_m else 0)),
+                "title": title,
+            })
+        return results
+
     def update_offer_price(self, item_id, price, variation_sku=None):
-        """Push price update to eBay via Trading API ReviseItem."""
+        """Push price update to eBay via Trading API ReviseItem.
+        Handles both SKU-based and aspect-based variation identification.
+        """
         if item_id and str(item_id).startswith("v1|"):
             parts = str(item_id).split("|")
             legacy_id = parts[1] if len(parts) > 1 else item_id
@@ -577,27 +623,31 @@ class EbayClient:
             logger.warning("update_offer_price: no valid item ID")
             return
 
+        sku_str, aspects = self._parse_variation_sku(variation_sku)
+
         variation_xml = ""
         item_price_xml = ""
-        if variation_sku:
-            sku_str = None
-            try:
-                parsed = json.loads(variation_sku) if isinstance(variation_sku, str) else variation_sku
-                if isinstance(parsed, dict):
-                    logger.warning("update_offer_price: platform_variant_id in old JSON format for %s, skipping", legacy_id)
-                    return
-                else:
-                    sku_str = str(variation_sku).strip()
-            except (json.JSONDecodeError, TypeError):
-                sku_str = str(variation_sku).strip()
 
-            if sku_str:
-                variation_xml = (
-                    "<Variations><Variation>"
-                    f"<SKU>{sku_str}</SKU>"
-                    f"<StartPrice currencyID='GBP'>{price:.2f}</StartPrice>"
-                    "</Variation></Variations>"
-                )
+        if aspects:
+            # Aspect-based variation — use VariationSpecifics
+            specs_xml = self._variation_specifics_xml(aspects)
+            if not specs_xml:
+                logger.warning("update_offer_price: empty aspects for item %s, skipping", legacy_id)
+                return
+            variation_xml = (
+                "<Variations><Variation>"
+                f"<StartPrice currencyID='GBP'>{price:.2f}</StartPrice>"
+                f"{specs_xml}"
+                "</Variation></Variations>"
+            )
+        elif sku_str:
+            # SKU-based variation
+            variation_xml = (
+                "<Variations><Variation>"
+                f"<SKU>{sku_str}</SKU>"
+                f"<StartPrice currencyID='GBP'>{price:.2f}</StartPrice>"
+                "</Variation></Variations>"
+            )
 
         if not variation_xml:
             item_price_xml = f"<StartPrice currencyID='GBP'>{price:.2f}</StartPrice>"
@@ -623,9 +673,39 @@ class EbayClient:
             logger.info("Price pushed to eBay item %s: £%.2f (with warning)", legacy_id, price)
         else:
             logger.info("Price pushed to eBay item %s: £%.2f", legacy_id, price)
+            if name.startswith("_"):
+                continue
+            nvl += (
+                "<NameValueList>"
+                f"<Name>{name}</Name>"
+                f"<Value>{value}</Value>"
+                "</NameValueList>"
+            )
+        return f"<VariationSpecifics>{nvl}</VariationSpecifics>" if nvl else ""
+
+    def _parse_variation_sku(self, variation_sku):
+        """Parse variation_sku into (sku_str, aspects_dict).
+        Returns one of:
+          - (sku_string, None) — use <SKU> in API calls
+          - (None, {"Colour": "Red"}) — use <VariationSpecifics>
+          - (None, None) — not a variation
+        """
+        if not variation_sku:
+            return None, None
+        try:
+            parsed = json.loads(variation_sku) if isinstance(variation_sku, str) else variation_sku
+            if isinstance(parsed, dict):
+                return None, parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return str(variation_sku).strip(), None
 
     def update_inventory_quantity(self, item_id, quantity, variation_sku=None):
-        """Push stock update to eBay via Trading API ReviseInventoryStatus."""
+        """Push stock update to eBay.
+        Uses ReviseInventoryStatus with <SKU> when possible.
+        Falls back to ReviseItem with <VariationSpecifics> when the variation
+        has no custom SKU (only aspect-based identification).
+        """
         if item_id and str(item_id).startswith("v1|"):
             parts = str(item_id).split("|")
             legacy_id = parts[1] if len(parts) > 1 else item_id
@@ -636,41 +716,49 @@ class EbayClient:
             logger.warning("update_inventory_quantity: no valid item ID")
             return
 
-        variation_xml = ""
-        if variation_sku:
-            sku_str = None
-            try:
-                parsed = json.loads(variation_sku) if isinstance(variation_sku, str) else variation_sku
-                if isinstance(parsed, dict):
-                    logger.warning("platform_variant_id is in old JSON aspects format for item %s - "
-                                   "needs re-sync to get variation SKU. Stock push skipped for this item.", legacy_id)
-                    return
-                else:
-                    sku_str = str(variation_sku).strip()
-            except (json.JSONDecodeError, TypeError):
-                sku_str = str(variation_sku).strip()
+        sku_str, aspects = self._parse_variation_sku(variation_sku)
 
-            if sku_str:
-                variation_xml = f"<SKU>{sku_str}</SKU>"
-
-        xml_body = (
-            '<?xml version="1.0" encoding="utf-8"?>'
-            '<ReviseInventoryStatusRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
-            "<InventoryStatus>"
-            f"<ItemID>{legacy_id}</ItemID>"
-            f"<Quantity>{quantity}</Quantity>"
-            f"{variation_xml}"
-            "</InventoryStatus>"
-            "</ReviseInventoryStatusRequest>"
-        )
-
-        resp_text = self._trading_api_call("ReviseInventoryStatus", xml_body)
+        if aspects:
+            # No custom SKU — must use ReviseItem with VariationSpecifics
+            specs_xml = self._variation_specifics_xml(aspects)
+            if not specs_xml:
+                logger.warning("update_inventory_quantity: empty aspects for item %s, skipping", legacy_id)
+                return
+            xml_body = (
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+                "<Item>"
+                f"<ItemID>{legacy_id}</ItemID>"
+                "<Variations><Variation>"
+                f"<Quantity>{quantity}</Quantity>"
+                f"{specs_xml}"
+                "</Variation></Variations>"
+                "</Item>"
+                "</ReviseItemRequest>"
+            )
+            resp_text = self._trading_api_call("ReviseItem", xml_body)
+            call_name = "ReviseItem"
+        else:
+            # Use fast ReviseInventoryStatus with optional <SKU>
+            variation_xml = f"<SKU>{sku_str}</SKU>" if sku_str else ""
+            xml_body = (
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<ReviseInventoryStatusRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+                "<InventoryStatus>"
+                f"<ItemID>{legacy_id}</ItemID>"
+                f"<Quantity>{quantity}</Quantity>"
+                f"{variation_xml}"
+                "</InventoryStatus>"
+                "</ReviseInventoryStatusRequest>"
+            )
+            resp_text = self._trading_api_call("ReviseInventoryStatus", xml_body)
+            call_name = "ReviseInventoryStatus"
 
         if "<Ack>Failure</Ack>" in resp_text:
-            logger.error("ReviseInventoryStatus Failure for %s: %s", legacy_id, resp_text[:500])
-            raise RuntimeError(f"ReviseInventoryStatus failed for {legacy_id}")
+            logger.error("%s Failure for %s: %s", call_name, legacy_id, resp_text[:500])
+            raise RuntimeError(f"{call_name} failed for {legacy_id}")
         elif "<Ack>Warning</Ack>" in resp_text:
-            logger.warning("ReviseInventoryStatus Warning for %s: %s", legacy_id, resp_text[:300])
+            logger.warning("%s Warning for %s: %s", call_name, legacy_id, resp_text[:300])
             logger.info("Stock pushed to eBay item %s: qty=%s (with warning)", legacy_id, quantity)
         else:
             logger.info("Stock pushed to eBay item %s: qty=%s", legacy_id, quantity)
