@@ -69,7 +69,14 @@ class SyncEngine:
         if existing_skus is not None:
             if sku in existing_skus:
                 return 0  # already in DB, skip
-        
+
+        # Also check by eBay item ID — prevents reimport when SKU format changed
+        # (e.g. item previously imported under eBay item ID, now returning with custom variant SKU)
+        item_id_raw = item.get("item_id", "")
+        if item_id_raw and existing_ebay_item_ids:
+            normalised = item_id_raw.split("|")[1] if "|" in item_id_raw else item_id_raw
+            if normalised in existing_ebay_item_ids:
+                return 0
 
         name = item.get("title", "") or "Unnamed"
         if item.get("is_variant") and item.get("aspects"):
@@ -101,6 +108,10 @@ class SyncEngine:
                                           "total_stock": item.get("quantity", 0)})
                 if existing_skus is not None:
                     existing_skus.add(sku)  # keep in-memory set up to date
+                # Also track item ID so other variants of same listing aren't reimported
+                if item_id_raw and existing_ebay_item_ids is not None:
+                    normalised_new = item_id_raw.split("|")[1] if "|" in item_id_raw else item_id_raw
+                    existing_ebay_item_ids.add(normalised_new)
             variation_sku = item.get("variation_sku") if item.get("is_variant") else None
             try:
                 self.db.upsert_price({
