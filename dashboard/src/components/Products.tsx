@@ -1,9 +1,9 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { Plus, Trash2, Search, RefreshCw, AlertTriangle, Link, Unlink, X, GitMerge, Undo2, Pencil } from 'lucide-react';
+import { Plus, Trash2, Search, RefreshCw, AlertTriangle, Link, Unlink, X, GitMerge, Undo2, Pencil, Scissors } from 'lucide-react';
 import type { Product, Inventory, Pricing } from '../types';
 import {
   createProduct, createInventory, createPricing, deleteProduct,
-  updateInventory, updatePricing, mergeProducts, updateProduct, undoLastMerge, getLastMergeSnapshot,
+  updateInventory, updatePricing, mergeProducts, updateProduct, undoLastMerge, getLastMergeSnapshot, splitProduct,
 } from '../utils/supabase';
 
 interface ProductsProps {
@@ -560,6 +560,50 @@ export const Products: React.FC<ProductsProps> = ({
     finally { setBusy(false); }
   }, [onRefresh]);
 
+  const handleSplit = useCallback(async () => {
+    // Find all checked products — they should share the same product_id
+    const checked = products.filter(p => checkedIds.has(p.id));
+    if (checked.length === 0) return;
+
+    // Group by product_id to find multi-variant products to split
+    const byProductId = new Map<string, typeof checked>();
+    for (const p of checked) {
+      const pid = p.product_id;
+      if (!pid) continue;
+      if (!byProductId.has(pid)) byProductId.set(pid, []);
+      byProductId.get(pid)!.push(p);
+    }
+
+    // Count how many variants each product_id has total (not just checked ones)
+    const splitCandidates: string[] = [];
+    for (const pid of byProductId.keys()) {
+      const allWithPid = products.filter(p => p.product_id === pid);
+      if (allWithPid.length > 1) splitCandidates.push(pid);
+    }
+
+    if (splitCandidates.length === 0) {
+      showToast('Selected items are already individual products — nothing to split.');
+      return;
+    }
+
+    const totalVariants = splitCandidates.reduce((sum, pid) =>
+      sum + products.filter(p => p.product_id === pid).length, 0);
+
+    if (!confirm(`Split ${splitCandidates.length} grouped product(s) (${totalVariants} variants total) into individual items?`)) return;
+
+    setBusy(true);
+    try {
+      let moved = 0;
+      for (const pid of splitCandidates) {
+        moved += await splitProduct(pid);
+      }
+      setCheckedIds(new Set());
+      showToast(`Split complete! ${moved} variant(s) moved to individual products.`);
+      onRefresh();
+    } catch (e: any) { showToast('Split failed: ' + (e.message || e)); }
+    finally { setBusy(false); }
+  }, [products, checkedIds, onRefresh]);
+
   useEffect(() => {
     getLastMergeSnapshot().then(setLastMerge).catch(() => setLastMerge(null));
   }, [products]);
@@ -847,6 +891,21 @@ export const Products: React.FC<ProductsProps> = ({
               <GitMerge size={14} /> Merge
             </button>
           )}
+          {checkedIds.size >= 1 && (() => {
+            const checked = products.filter(p => checkedIds.has(p.id));
+            const hasGrouped = checked.some(p =>
+              p.product_id && products.filter(pp => pp.product_id === p.product_id).length > 1
+            );
+            return hasGrouped ? (
+              <button
+                className="btn btn-warning btn-sm rounded-full gap-1"
+                onClick={handleSplit}
+                disabled={busy}
+              >
+                <Scissors size={14} /> Split to Singles
+              </button>
+            ) : null;
+          })()}
           <button
             className="btn btn-ghost btn-sm btn-circle"
             onClick={() => setCheckedIds(new Set())}

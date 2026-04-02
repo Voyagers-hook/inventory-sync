@@ -631,6 +631,67 @@ export async function updateOrder(id: string, updates: Partial<import('../types'
   if (error) throw error;
 }
 
+// ─── Split Product (undo grouping) ──────────────────────────────────────────
+
+/**
+ * Split a multi-variant product into individual single-variant products.
+ * Each variant gets its own product row, named after the variant's current name.
+ * All variants are marked needs_sync so the next sync picks them up.
+ */
+export async function splitProduct(productId: string): Promise<number> {
+  // 1. Find all variants under this product
+  const { data: variants, error: vErr } = await supabase
+    .from('variants')
+    .select('id, internal_sku, option1, option2, name')
+    .eq('product_id', productId);
+  if (vErr) throw vErr;
+  if (!variants || variants.length <= 1) return 0; // nothing to split
+
+  // 2. Get the parent product name
+  const { data: prod, error: pErr } = await supabase
+    .from('products')
+    .select('name')
+    .eq('id', productId)
+    .single();
+  if (pErr) throw pErr;
+  const baseName = prod?.name ?? 'Product';
+
+  let moved = 0;
+  // 3. For each variant after the first, create a new product and re-parent
+  for (let i = 1; i < variants.length; i++) {
+    const v = variants[i];
+    const variantLabel = v.option1 || v.option2 || v.internal_sku || `Variant ${i + 1}`;
+    const newName = `${baseName} - ${variantLabel}`;
+
+    // Create new product
+    const { data: newProd, error: npErr } = await supabase
+      .from('products')
+      .insert({ name: newName, status: 'active', active: true })
+      .select()
+      .single();
+    if (npErr) throw npErr;
+
+    // Re-parent variant
+    const { error: upErr } = await supabase
+      .from('variants')
+      .update({ product_id: newProd.id, needs_sync: true })
+      .eq('id', v.id);
+    if (upErr) throw upErr;
+
+    moved++;
+  }
+
+  // 4. Mark the remaining first variant as needs_sync too
+  if (variants.length > 0) {
+    await supabase
+      .from('variants')
+      .update({ needs_sync: true })
+      .eq('id', variants[0].id);
+  }
+
+  return moved;
+}
+
 // ─── Settings (array fetch + update) ─────────────────────────────────────────
 
 export async function fetchSettings(): Promise<Setting[]> {
