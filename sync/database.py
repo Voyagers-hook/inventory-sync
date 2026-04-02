@@ -90,19 +90,31 @@ class Database:
         """Fetch ALL channel_listings in one call. Returns list."""
         return self._rest("GET", "channel_listings", params={"select": "*", "limit": "10000"})
 
-    def bulk_insert_rows(self, table: str, rows: list, batch_size: int = 500):
-        """Bulk insert rows in batches. Uses return=minimal for speed."""
+    def bulk_insert_rows(self, table: str, rows: list, batch_size: int = 500,
+                        on_conflict: str = "ignore"):
+        """Bulk insert rows in batches with duplicate handling.
+
+        on_conflict: 'ignore' (skip duplicates) or 'merge' (upsert).
+        Uses Prefer: resolution=merge-duplicates or ignore-duplicates header.
+        """
         if not rows:
             return
+        resolution = "merge-duplicates" if on_conflict == "merge" else "ignore-duplicates"
         for i in range(0, len(rows), batch_size):
             batch = rows[i:i + batch_size]
             try:
                 self._rest("POST", table, payload=batch,
-                           headers_extra={"Prefer": "return=minimal"})
+                           headers_extra={"Prefer": f"resolution={resolution},return=minimal"})
                 logger.info(f"Bulk insert {table}: {len(batch)} rows (batch {i // batch_size + 1})")
             except Exception as e:
-                logger.error(f"Bulk insert {table} batch {i // batch_size + 1} failed: {e}")
-                raise
+                # Fallback: insert one by one, skipping failures
+                logger.warning(f"Bulk insert {table} batch failed, inserting individually: {e}")
+                for row in batch:
+                    try:
+                        self._rest("POST", table, payload=row,
+                                   headers_extra={"Prefer": f"resolution={resolution},return=minimal"})
+                    except Exception as e2:
+                        logger.warning(f"Individual insert {table} skipped: {e2}")
 
     def count_products(self):
         rows = self._rest("GET", "variants", params={"select": "id", "limit": "1"})
