@@ -72,8 +72,10 @@ class SyncEngine:
 
         # Also check by eBay item ID — prevents reimport when SKU format changed
         # (e.g. item previously imported under eBay item ID, now returning with custom variant SKU)
+        # BUT only for single-variant items. Multi-variant items share the same item_id
+        # across all variants, so checking item_id would skip variants 2+ of the same listing.
         item_id_raw = item.get("item_id", "")
-        if item_id_raw and existing_ebay_item_ids:
+        if item_id_raw and existing_ebay_item_ids and not item.get("is_variant"):
             normalised = item_id_raw.split("|")[1] if "|" in item_id_raw else item_id_raw
             if normalised in existing_ebay_item_ids:
                 return 0
@@ -108,8 +110,9 @@ class SyncEngine:
                                           "total_stock": item.get("quantity", 0)})
                 if existing_skus is not None:
                     existing_skus.add(sku)  # keep in-memory set up to date
-                # Also track item ID so other variants of same listing aren't reimported
-                if item_id_raw and existing_ebay_item_ids is not None:
+                # Track item ID for single-variant items only — multi-variant items
+                # share the same item_id, so adding it would block sibling variants
+                if item_id_raw and existing_ebay_item_ids is not None and not item.get("is_variant"):
                     normalised_new = item_id_raw.split("|")[1] if "|" in item_id_raw else item_id_raw
                     existing_ebay_item_ids.add(normalised_new)
             variation_sku = item.get("variation_sku") if item.get("is_variant") else None
