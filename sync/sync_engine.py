@@ -65,9 +65,12 @@ class SyncEngine:
         if sku in merged_skus:
             return 0
 
-        # Fast in-memory check: if we have a pre-loaded SKU set, use it; otherwise hit DB
+        # Fast in-memory check: existing_skus is a set of (bare_item_id, sku) tuples.
+        # SKUs are NOT globally unique — same SKU can exist on different eBay listings.
         if existing_skus is not None:
-            if sku in existing_skus:
+            item_id_raw_check = item.get("item_id", "")
+            bare_id_check = item_id_raw_check.split("|")[1] if "|" in item_id_raw_check else item_id_raw_check
+            if (bare_id_check, sku) in existing_skus:
                 return 0  # already in DB, skip
 
         # Also check by eBay item ID — prevents reimport when SKU format changed
@@ -109,7 +112,8 @@ class SyncEngine:
                                           "product_id": existing.get("product_id"),
                                           "total_stock": item.get("quantity", 0)})
                 if existing_skus is not None:
-                    existing_skus.add(sku)  # keep in-memory set up to date
+                    bare_id_new = item_id_raw.split("|")[1] if "|" in item_id_raw else item_id_raw
+                    existing_skus.add((bare_id_new, sku))  # keep in-memory set up to date
                 # Track item ID for single-variant items only — multi-variant items
                 # share the same item_id, so adding it would block sibling variants
                 if item_id_raw and existing_ebay_item_ids is not None and not item.get("is_variant"):
@@ -367,17 +371,20 @@ class SyncEngine:
 
         merged_skus, existing_ebay_item_ids = self._load_blocklists()
 
-        # Pre-load SKUs that already have a channel_listing on eBay — not just variants.
-        # This way variants that exist but have no channel_listing still get processed.
-        existing_skus = set()
+        # Pre-load (item_id, SKU) pairs from channel_listings — not just SKUs.
+        # SKUs are NOT globally unique: e.g. "38mm Pearl" exists on multiple eBay listings.
+        # We must dedup by (item_id, sku) pair to allow the same SKU on different listings.
+        existing_skus = set()  # set of (bare_item_id, sku) tuples
         try:
             rows = self.db._rest("GET", "channel_listings",
-                                 params={"select": "channel_sku", "channel": "eq.ebay", "limit": "10000"})
+                                 params={"select": "channel_sku,channel_product_id", "channel": "eq.ebay", "limit": "10000"})
             for r in rows:
                 s = r.get("channel_sku")
+                pid = r.get("channel_product_id", "")
+                bare_id = pid.split("|")[1] if pid and "|" in pid else pid
                 if s:
-                    existing_skus.add(s)
-            logger.info("Pre-loaded %d existing eBay channel_skus", len(existing_skus))
+                    existing_skus.add((bare_id, s))
+            logger.info("Pre-loaded %d existing eBay (item_id, sku) pairs", len(existing_skus))
         except Exception as e:
             logger.warning("Could not pre-load existing_skus — falling back to per-item DB checks: %s", e)
 
