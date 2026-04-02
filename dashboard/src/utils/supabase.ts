@@ -642,7 +642,7 @@ export async function splitProduct(productId: string): Promise<number> {
   // 1. Find all variants under this product
   const { data: variants, error: vErr } = await supabase
     .from('variants')
-    .select('id, internal_sku, option1, option2, name')
+    .select('id, internal_sku, option1, option2')
     .eq('product_id', productId);
   if (vErr) throw vErr;
   if (!variants || variants.length <= 1) return 0; // nothing to split
