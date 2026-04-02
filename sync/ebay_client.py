@@ -673,6 +673,13 @@ class EbayClient:
             logger.info("Price pushed to eBay item %s: £%.2f (with warning)", legacy_id, price)
         else:
             logger.info("Price pushed to eBay item %s: £%.2f", legacy_id, price)
+
+    def _variation_specifics_xml(self, aspects):
+        """Build <VariationSpecifics> XML from an aspects dict like {"Colour": "Red"}."""
+        if not aspects:
+            return ""
+        nvl = ""
+        for name, value in aspects.items():
             if name.startswith("_"):
                 continue
             nvl += (
