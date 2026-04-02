@@ -25,6 +25,33 @@ const SUPABASE_ANON_KEY = (import.meta.env.VITE_SUPABASE_ANON_KEY as string) || 
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// ─── Pagination helper ───────────────────────────────────────────────────────
+// Supabase PostgREST returns max 1 000 rows per request.
+// This helper pages through all rows so we never silently drop data.
+
+async function fetchAll<T = any>(
+  table: string,
+  select = '*',
+  opts?: { order?: string; ascending?: boolean; filters?: (q: any) => any },
+): Promise<T[]> {
+  const PAGE = 1000;
+  let offset = 0;
+  const all: T[] = [];
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    let q = supabase.from(table).select(select).range(offset, offset + PAGE - 1);
+    if (opts?.order) q = q.order(opts.order, { ascending: opts.ascending ?? true });
+    if (opts?.filters) q = opts.filters(q);
+    const { data, error } = await q;
+    if (error) throw error;
+    const rows = (data ?? []) as T[];
+    all.push(...rows);
+    if (rows.length < PAGE) break;
+    offset += PAGE;
+  }
+  return all;
+}
+
 // ─── Products ────────────────────────────────────────────────────────────────
 
 /**
@@ -34,32 +61,43 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
  */
 export async function fetchProducts(): Promise<Product[]> {
   // PostgREST embedding: variants joined with parent products
-  const { data, error } = await supabase
-    .from('variants')
-    .select(`
-      id,
-      product_id,
-      internal_sku,
-      option1,
-      option2,
-      needs_sync,
-      last_synced_at,
-      created_at,
-      updated_at,
-      products (
-        name,
-        description,
-        status,
-        cost_price,
-        active
-      )
-    `)
-    .order('created_at', { ascending: false })
-    .limit(5000);
+  // Paginate in chunks of 1000 (Supabase hard cap per request)
+  const PAGE = 1000;
+  let offset = 0;
+  const all: any[] = [];
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { data, error } = await supabase
+      .from('variants')
+      .select(`
+        id,
+        product_id,
+        internal_sku,
+        option1,
+        option2,
+        needs_sync,
+        last_synced_at,
+        created_at,
+        updated_at,
+        products (
+          name,
+          description,
+          status,
+          cost_price,
+          active
+        )
+      `)
+      .order('created_at', { ascending: false })
+      .range(offset, offset + PAGE - 1);
 
-  if (error) throw error;
+    if (error) throw error;
+    const rows = data ?? [];
+    all.push(...rows);
+    if (rows.length < PAGE) break;
+    offset += PAGE;
+  }
 
-  return (data || []).map((v: any) => ({
+  return all.map((v: any) => ({
     id: v.id,                               // variant_id — primary key for UI
     product_id: v.product_id,
     sku: v.internal_sku ?? '',
@@ -168,18 +206,11 @@ export async function deleteProduct(variantId: string) {
  * Returns with both variant_id and product_id set (for backward compat).
  */
 export async function fetchInventory(): Promise<Inventory[]> {
-  const { data, error } = await supabase
-    .from('inventory')
-    .select('*')
-    .limit(5000);
-  if (error) throw error;
-  return (data || []).map((row: any) => {
+  const raw = await fetchAll('inventory', '*');
+  return raw.map((row: any) => {
     const variantId = row.variant_id ?? row.product_id;
     return {
       ...row,
-      // Normalise: product_id is set to variant_id so existing component lookups
-      // (inventory.find(i => i.product_id === p.id)) continue to work after migration
-      // (p.id is now variant_id, so product_id must also equal variant_id here)
       variant_id: variantId,
       product_id: variantId,
     };
@@ -231,13 +262,9 @@ export async function updateInventory(
  * product_id = variant_id in the returned objects.
  */
 export async function fetchPricing(): Promise<Pricing[]> {
-  const { data, error } = await supabase
-    .from('channel_listings')
-    .select('*')
-    .limit(5000);
-  if (error) throw error;
+  const raw = await fetchAll('channel_listings', '*');
 
-  return (data || []).map((cl: any) => ({
+  return raw.map((cl: any) => ({
     id: cl.id,
     product_id: cl.variant_id,       // map variant_id → product_id for compat
     platform: cl.channel,             // map channel → platform for compat
@@ -532,15 +559,26 @@ export async function undoLastMerge(): Promise<string> {
 // ─── Orders ──────────────────────────────────────────────────────────────────
 
 export async function fetchOrders(platform?: string, limit = 2000): Promise<Order[]> {
-  let query = supabase
-    .from('orders')
-    .select('*')
-    .order('ordered_at', { ascending: false })
-    .limit(limit);
-  if (platform) query = query.eq('platform', platform);
-  const { data, error } = await query;
-  if (error) throw error;
-  return data || [];
+  // Paginate to respect Supabase 1000-row cap
+  const PAGE = 1000;
+  let offset = 0;
+  const all: Order[] = [];
+  while (all.length < limit) {
+    const end = Math.min(offset + PAGE - 1, limit - 1);
+    let q = supabase
+      .from('orders')
+      .select('*')
+      .order('ordered_at', { ascending: false })
+      .range(offset, end);
+    if (platform) q = q.eq('platform', platform);
+    const { data, error } = await q;
+    if (error) throw error;
+    const rows = (data ?? []) as Order[];
+    all.push(...rows);
+    if (rows.length < PAGE) break;
+    offset += PAGE;
+  }
+  return all;
 }
 
 export async function updateOrderTracking(
