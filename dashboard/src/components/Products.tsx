@@ -1,5 +1,5 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import { Plus, Trash2, Search, RefreshCw, AlertTriangle, Link, Unlink, X, GitMerge, Undo2 } from 'lucide-react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { Plus, Trash2, Search, RefreshCw, AlertTriangle, Link, Unlink, X, GitMerge, Undo2, Pencil } from 'lucide-react';
 import type { Product, Inventory, Pricing } from '../types';
 import {
   createProduct, createInventory, createPricing, deleteProduct,
@@ -367,6 +367,94 @@ const MergeModal: React.FC<{
   );
 };
 
+// ─── Inline Edit Cell ────────────────────────────────────────────────────────
+// Click a stock or price value in the table to edit it directly without opening the modal.
+const InlineEditCell: React.FC<{
+  value: string;
+  displayValue: string;
+  onSave: (newValue: string) => Promise<void>;
+  onRefresh: () => void;
+  showToast: (msg: string) => void;
+  type?: 'number';
+  prefix?: string;
+  className?: string;
+  disabled?: boolean;
+}> = ({ value, displayValue, onSave, onRefresh, showToast, type = 'number', prefix, className, disabled }) => {
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(value);
+  const [saving, setSaving] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  const handleSave = async () => {
+    if (saving) return;
+    const trimmed = editValue.trim();
+    if (trimmed === value || trimmed === '') {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      await onSave(trimmed);
+      showToast('Saved — sync queued ⏳');
+      onRefresh();
+    } catch {
+      showToast('Failed to save');
+    } finally {
+      setSaving(false);
+      setEditing(false);
+    }
+  };
+
+  if (disabled) {
+    return <span className="text-base-content/30 text-sm">—</span>;
+  }
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-0.5" onClick={e => e.stopPropagation()}>
+        {prefix && <span className="text-xs text-base-content/50">{prefix}</span>}
+        <input
+          ref={inputRef}
+          type={type}
+          className="input input-bordered input-xs w-20 font-mono"
+          value={editValue}
+          onChange={e => setEditValue(e.target.value)}
+          onBlur={handleSave}
+          onKeyDown={e => {
+            if (e.key === 'Enter') { e.preventDefault(); handleSave(); }
+            if (e.key === 'Escape') { setEditing(false); }
+          }}
+          step={prefix ? '0.01' : '1'}
+          min="0"
+          disabled={saving}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <span
+      className={`cursor-pointer hover:bg-primary/10 px-1.5 py-0.5 rounded transition-colors group inline-flex items-center gap-1 ${className || ''}`}
+      onClick={e => {
+        e.stopPropagation();
+        setEditValue(value);
+        setEditing(true);
+      }}
+      title="Click to edit"
+    >
+      {displayValue}
+      <Pencil size={10} className="opacity-0 group-hover:opacity-40 transition-opacity" />
+    </span>
+  );
+};
+
 // ─── Main Products Component ──────────────────────────────────────────────────
 export const Products: React.FC<ProductsProps> = ({
   products, inventory, pricing, onRefresh, initialLowStockFilter, onFilterApplied,
@@ -537,7 +625,7 @@ export const Products: React.FC<ProductsProps> = ({
       </div>
 
       <div className="text-xs text-base-content/50">
-        {filtered.length} of {products.length} products · Click a row to edit prices &amp; stock · Tick checkboxes to merge duplicates
+        {filtered.length} of {products.length} products · Click stock or price to edit inline · Click row for full details · Tick checkboxes to merge
       </div>
 
       {/* Product table */}
@@ -623,14 +711,41 @@ export const Products: React.FC<ProductsProps> = ({
                       </div>
                     </td>
                     <td>
-                      <span className={lowStock ? 'text-warning font-medium' : ''}>
-                        {inv?.total_stock ?? 0}
-                      </span>
-                      {lowStock && <AlertTriangle size={12} className="inline ml-1 text-warning" />}
+                      <InlineEditCell
+                        value={String(inv?.total_stock ?? 0)}
+                        displayValue={(() => {
+                          const stock = inv?.total_stock ?? 0;
+                          return `${stock}${lowStock ? ' ⚠' : ''}`;
+                        })()}
+                        className={lowStock ? 'text-warning font-medium' : ''}
+                        onSave={async (v) => { await updateInventory(p.id, { total_stock: Math.max(0, parseInt(v) || 0) }); }}
+                        onRefresh={onRefresh}
+                        showToast={showToast}
+                      />
                       {p.needs_sync && <span className="text-xs text-info ml-1" title="Sync pending">⏳</span>}
                     </td>
-                    <td className="text-sm">{ssPr ? `£${Number(ssPr.price).toFixed(2)}` : <span className="text-base-content/30">—</span>}</td>
-                    <td className="text-sm">{ebPr ? `£${Number(ebPr.price).toFixed(2)}` : <span className="text-base-content/30">—</span>}</td>
+                    <td className="text-sm">
+                      <InlineEditCell
+                        value={ssPr ? Number(ssPr.price).toFixed(2) : ''}
+                        displayValue={ssPr ? `£${Number(ssPr.price).toFixed(2)}` : '—'}
+                        prefix="£"
+                        disabled={!ssPr}
+                        onSave={async (v) => { if (ssPr) await updatePricing(ssPr.id, parseFloat(v) || 0); }}
+                        onRefresh={onRefresh}
+                        showToast={showToast}
+                      />
+                    </td>
+                    <td className="text-sm">
+                      <InlineEditCell
+                        value={ebPr ? Number(ebPr.price).toFixed(2) : ''}
+                        displayValue={ebPr ? `£${Number(ebPr.price).toFixed(2)}` : '—'}
+                        prefix="£"
+                        disabled={!ebPr}
+                        onSave={async (v) => { if (ebPr) await updatePricing(ebPr.id, parseFloat(v) || 0); }}
+                        onRefresh={onRefresh}
+                        showToast={showToast}
+                      />
+                    </td>
                     <td onClick={e => e.stopPropagation()}>
                       <button
                         className="btn btn-ghost btn-xs btn-circle text-error hover:bg-error/10"
