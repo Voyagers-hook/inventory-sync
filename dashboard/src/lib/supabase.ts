@@ -207,35 +207,26 @@ export async function mergeProducts(keepId: string, removeId: string, keepStock:
     { onConflict: 'key' }
   );
 
-  // ── Transfer channel_listings from removed product to kept product ──
-  // Use the first variant of the keep product as the target
-  const keepVariantId = keepVariantIds[0];
-  if (removedChannelListings && keepVariantId) {
-    const keepChannels = new Set((keepChannelListings || []).map((cl: any) => cl.channel));
-    for (const cl of removedChannelListings) {
-      if (!keepChannels.has(cl.channel)) {
-        // This channel isn't on the keep product yet — transfer it
-        await supabase.from('channel_listings')
-          .update({ variant_id: keepVariantId, updated_at: new Date().toISOString() })
-          .eq('id', cl.id);
-      }
-      // If keep product already has this channel, just drop the duplicate
-    }
-  }
-
-  // Move orders and sales trends to kept product
-  await supabase.from('orders').update({ product_id: keepId }).eq('product_id', removeId);
-  await supabase.from('sales_trends').update({ product_id: keepId }).eq('product_id', removeId);
-
-  // Update stock on kept product (also triggers needs_sync push to platforms)
-  await updateInventory(keepId, { total_stock: keepStock });
-
-  // Delete removed product's remaining channel_listings, variants, inventory, product row
+  // ── Move variants (with all their channel_listings intact) to the kept product ──
+  // We reassign product_id on the variants rather than touching channel_listings.
+  // This preserves each variant's eBay/Squarespace links exactly as-is.
   if (removedVariantIds.length > 0) {
-    await supabase.from('channel_listings').delete().in('variant_id', removedVariantIds);
-    await supabase.from('variants').delete().eq('product_id', removeId);
+    await supabase.from('variants')
+      .update({ product_id: keepId, updated_at: new Date().toISOString() })
+      .eq('product_id', removeId);
+    // Also move inventory rows that are linked to those variants
+    await supabase.from('inventory')
+      .update({ product_id: keepId })
+      .in('variant_id', removedVariantIds);
   }
-  await supabase.from('inventory').delete().eq('product_id', removeId);
+
+  // Move orders to kept product
+  await supabase.from('orders').update({ product_id: keepId }).eq('product_id', removeId);
+
+  // Delete orphaned inventory row for removed product (product-level, not variant-level)
+  await supabase.from('inventory').delete().eq('product_id', removeId).is('variant_id', null);
+
+  // Delete the removed product row (variants are already re-homed)
   await supabase.from('products').delete().eq('id', removeId);
 
   // ── Add removed product's SKUs to merged_skus blocklist ──
@@ -282,7 +273,9 @@ export async function undoLastMerge(): Promise<string> {
   const snap = JSON.parse(data.value);
   const { keepId, removeId, removedProduct, removedVariants, removedChannelListings, removedInventory, keepInventory } = snap;
 
-  // 1. Re-create the removed product
+  const removedVariantIds: string[] = (removedVariants || []).map((v: any) => v.id);
+
+  // 1. Re-create the removed product row
   const { error: prodErr } = await supabase.from('products').insert({
     id: removedProduct.id,
     sku: removedProduct.sku,
@@ -298,64 +291,18 @@ export async function undoLastMerge(): Promise<string> {
   });
   if (prodErr) throw prodErr;
 
-  // 2. Re-create variants for the removed product
-  if (removedVariants) {
-    for (const v of removedVariants) {
-      await supabase.from('variants').insert({
-        id: v.id,
-        product_id: removeId,
-        internal_sku: v.internal_sku,
-        option1: v.option1,
-        option2: v.option2,
-        needs_sync: false,
-        created_at: v.created_at,
-        updated_at: new Date().toISOString(),
-      });
-    }
-  }
-
-  // 3. Move transferred channel_listings back to the removed product's variants
-  if (removedChannelListings) {
-    for (const cl of removedChannelListings) {
-      // Check if this channel_listing still exists (was transferred to keep product)
-      const { data: onKept } = await supabase.from('channel_listings').select('id').eq('id', cl.id);
-      if (onKept && onKept.length > 0) {
-        // Move it back to the original variant
-        await supabase.from('channel_listings')
-          .update({ variant_id: cl.variant_id, updated_at: new Date().toISOString() })
-          .eq('id', cl.id);
-      } else {
-        // Row was deleted — re-create it
-        await supabase.from('channel_listings').insert({
-          variant_id: cl.variant_id,
-          channel: cl.channel,
-          channel_price: cl.channel_price,
-          channel_product_id: cl.channel_product_id,
-          channel_variant_id: cl.channel_variant_id,
-          updated_at: new Date().toISOString(),
-        });
-      }
-    }
-  }
-
-  // 4. Re-create inventory for removed product
-  if (removedInventory) {
-    await supabase.from('inventory').insert({
-      product_id: removeId,
-      variant_id: removedVariants?.[0]?.id || null,
-      total_stock: removedInventory.total_stock,
-      reserved_stock: removedInventory.reserved_stock,
-      low_stock_threshold: removedInventory.low_stock_threshold,
-      updated_at: new Date().toISOString(),
-    });
-  }
-
-  // 5. Restore kept product's original stock
-  if (keepInventory) {
+  // 2. Move variants back to the restored product
+  // (Merge only changed product_id — it never deleted variants or channel_listings)
+  if (removedVariantIds.length > 0) {
+    await supabase.from('variants')
+      .update({ product_id: removeId, updated_at: new Date().toISOString() })
+      .in('id', removedVariantIds);
+    // Move inventory rows back too
     await supabase.from('inventory')
-      .update({ total_stock: keepInventory.total_stock, updated_at: new Date().toISOString() })
-      .eq('product_id', keepId);
+      .update({ product_id: removeId })
+      .in('variant_id', removedVariantIds);
   }
+  // channel_listings were never touched — they stay on their variants unchanged
 
   // 6. Remove SKUs from the merged_skus blocklist
   const skusToRemove: string[] = [];
