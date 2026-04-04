@@ -466,7 +466,7 @@ export const Products: React.FC<ProductsProps> = ({
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showMerge, setShowMerge] = useState(false);
-  const [lastMerge, setLastMerge] = useState<{ removedName: string; keepName: string; timestamp: string } | null>(null);
+  const [lastMerge, setLastMerge] = useState<{ removedName: string; keepName: string; timestamp: string; canUndo: boolean } | null>(null);
   const [newName, setNewName] = useState('');
   const [newSku, setNewSku] = useState('');
   const [toast, setToast] = useState('');
@@ -632,11 +632,14 @@ export const Products: React.FC<ProductsProps> = ({
         <div className="alert alert-info py-2 text-sm flex items-center justify-between gap-2">
           <span>
             <strong>Last merge:</strong> &ldquo;{lastMerge.removedName}&rdquo; merged into &ldquo;{lastMerge.keepName}&rdquo;
+            {!lastMerge.canUndo && <span className="text-base-content/50 ml-1">(undo not available — old merge)</span>}
           </span>
           <div className="flex items-center gap-1 flex-shrink-0">
-            <button className="btn btn-ghost btn-xs gap-1" onClick={handleUndoMerge} disabled={busy}>
-              <Undo2 size={12} /> Undo
-            </button>
+            {lastMerge.canUndo && (
+              <button className="btn btn-ghost btn-xs gap-1" onClick={handleUndoMerge} disabled={busy}>
+                <Undo2 size={12} /> Undo
+              </button>
+            )}
             <button
               className="btn btn-ghost btn-xs btn-circle"
               onClick={() => setLastMerge(null)}

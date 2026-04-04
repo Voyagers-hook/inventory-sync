@@ -260,16 +260,17 @@ export async function mergeProducts(keepId: string, removeId: string, keepStock:
 }
 
 /** Check if there's a merge that can be undone */
-export async function getLastMergeSnapshot(): Promise<{ removedName: string; keepName: string; timestamp: string } | null> {
+export async function getLastMergeSnapshot(): Promise<{ removedName: string; keepName: string; timestamp: string; canUndo: boolean } | null> {
   const { data } = await supabase.from('settings').select('value').eq('key', 'last_merge_snapshot').single();
   if (!data?.value) return null;
   try {
     const snap = JSON.parse(data.value);
-    return {
-      removedName: snap.removedProduct?.name || 'Unknown',
-      keepName: snap.keepProduct?.name || 'Unknown',
-      timestamp: snap.timestamp,
-    };
+    // Support both old format (keepName/removeName) and new format (keepProduct/removedProduct)
+    const removedName = snap.removedProduct?.name || snap.removeName || 'Unknown';
+    const keepName = snap.keepProduct?.name || snap.keepName || 'Unknown';
+    // canUndo requires full product data saved (new format only)
+    const canUndo = !!(snap.removedProduct && snap.removedVariants !== undefined);
+    return { removedName, keepName, timestamp: snap.timestamp, canUndo };
   } catch { return null; }
 }
 
