@@ -750,6 +750,8 @@ class SyncEngine:
                 channel_variant_id = row.get("channel_variant_id")
                 channel_price = row.get("channel_price")
 
+                if channel_price is None:
+                    continue  # skip rows with no price set
                 if channel == "squarespace":
                     if channel_product_id and channel_variant_id:
                         self.ss.update_variant_price(
@@ -878,14 +880,15 @@ class SyncEngine:
         last = self.db.get_setting("last_full_sync")
         since = last if last else (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        total += self.process_squarespace_orders(since)
-        total += self.process_ebay_orders(since)
-
-        # Fix broken eBay variant metadata BEFORE pushing stock/prices
         try:
-            self.refresh_ebay_variant_metadata()
+            total += self.process_squarespace_orders(since)
         except Exception as e:
-            logger.warning(f"refresh_ebay_variant_metadata failed (non-fatal): {e}")
+            logger.error(f"process_squarespace_orders failed (non-fatal, continuing): {e}")
+
+        try:
+            total += self.process_ebay_orders(since)
+        except Exception as e:
+            logger.error(f"process_ebay_orders failed (non-fatal, continuing): {e}")
 
         # Fix broken eBay variant metadata BEFORE pushing stock/prices
         try:
@@ -1082,8 +1085,16 @@ class SyncEngine:
 
         last = self.db.get_setting("last_full_sync")
         since = last if last else (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        count += self.process_squarespace_orders(since)
-        count += self.process_ebay_orders(since)
+        try:
+            count += self.process_squarespace_orders(since)
+        except Exception as e:
+            logger.error(f"process_squarespace_orders failed (non-fatal, continuing): {e}")
+
+        try:
+            count += self.process_ebay_orders(since)
+        except Exception as e:
+            logger.error(f"process_ebay_orders failed (non-fatal, continuing): {e}")
+
         self.db.set_setting("last_full_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         self.update_daily_snapshots()
 
