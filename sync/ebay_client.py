@@ -525,45 +525,40 @@ class EbayClient:
     # Write operations (Trading API)
     # ------------------------------------------------------------------
 
-    def _trading_api_call(self, call_name, xml_body):
-        """POST an XML request to eBay Trading API using OAuth token."""
+    def _trading_api_call(self, call_name, xml_body, _retried=False):
+        """POST an XML request to eBay Trading API using OAuth token.
+        Auto-refreshes token on HTTP 401 OR XML 'Expired IAF token' response.
+        """
         token = self._get_access_token()
         data = xml_body.encode("utf-8")
-        req = urllib.request.Request(
-            "https://api.ebay.com/ws/api.dll",
-            data=data,
-            headers={
-                "X-EBAY-API-SITEID": "3",
-                "X-EBAY-API-CALL-NAME": call_name,
-                "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
-                "X-EBAY-API-IAF-TOKEN": token,
-                "Content-Type": "text/xml",
-            },
-        )
+        headers = {
+            "X-EBAY-API-SITEID": "3",
+            "X-EBAY-API-CALL-NAME": call_name,
+            "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
+            "X-EBAY-API-IAF-TOKEN": token,
+            "Content-Type": "text/xml",
+        }
+        req = urllib.request.Request("https://api.ebay.com/ws/api.dll", data=data, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
-                return r.read().decode("utf-8")
+                resp_text = r.read().decode("utf-8")
         except urllib.error.HTTPError as e:
-            if e.code == 401:
+            if e.code == 401 and not _retried:
                 logger.info("Trading API 401 — refreshing token and retrying")
                 self._access_token = None
                 self._token_expiry = 0
-                token = self._get_access_token()
-                req2 = urllib.request.Request(
-                    "https://api.ebay.com/ws/api.dll",
-                    data=data,
-                    headers={
-                        "X-EBAY-API-SITEID": "3",
-                        "X-EBAY-API-CALL-NAME": call_name,
-                        "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
-                        "X-EBAY-API-IAF-TOKEN": token,
-                        "Content-Type": "text/xml",
-                    },
-                )
-                with urllib.request.urlopen(req2, timeout=30) as r:
-                    return r.read().decode("utf-8")
+                return self._trading_api_call(call_name, xml_body, _retried=True)
             body = e.read().decode()
             raise RuntimeError(f"Trading API {call_name} failed {e.code}: {body[:300]}")
+
+        # eBay Trading API returns HTTP 200 even for expired tokens — check XML body
+        if "Expired IAF token" in resp_text and not _retried:
+            logger.info("Trading API token expired (XML response) — force-refreshing and retrying")
+            self._access_token = None
+            self._token_expiry = 0
+            return self._trading_api_call(call_name, xml_body, _retried=True)
+
+        return resp_text
 
     def get_item_variations(self, legacy_id):
         """Fetch variation details for a multi-variant listing via Trading API.
