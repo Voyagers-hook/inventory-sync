@@ -661,6 +661,30 @@ class EbayClient:
         resp_text = self._trading_api_call("ReviseItem", xml_body)
 
         if "<Ack>Failure</Ack>" in resp_text:
+            # Self-healing fallback: if SKU-based and eBay complains about missing name-value list,
+            # retry using GetItem to discover the correct VariationSpecifics
+            if sku_str and ("missing name" in resp_text.lower() or "21916799" in resp_text or "SKU Mismatch" in resp_text or "Non-ManageBySKU" in resp_text):
+                logger.warning("ReviseItem price SKU failure for %s — trying GetItem aspect fallback", legacy_id)
+                fallback_aspects = self._get_variation_aspects_by_hint(legacy_id, sku_str)
+                if fallback_aspects:
+                    specs_xml = self._variation_specifics_xml(fallback_aspects)
+                    fallback_xml = (
+                        '<?xml version="1.0" encoding="utf-8"?>'
+                        '<ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+                        "<Item>"
+                        f"<ItemID>{legacy_id}</ItemID>"
+                        "<Variations><Variation>"
+                        f"<StartPrice currencyID='GBP'>{price:.2f}</StartPrice>"
+                        f"{specs_xml}"
+                        "</Variation></Variations>"
+                        "</Item>"
+                        "</ReviseItemRequest>"
+                    )
+                    resp_text = self._trading_api_call("ReviseItem", fallback_xml)
+                    if "<Ack>Failure</Ack>" not in resp_text:
+                        logger.info("Price pushed to eBay item %s: £%.2f (aspect fallback)", legacy_id, price)
+                        return
+                    logger.error("ReviseItem price aspect fallback also failed for %s: %s", legacy_id, resp_text[:400])
             logger.error("ReviseItem price Failure for %s: %s", legacy_id, resp_text[:500])
             raise RuntimeError(f"ReviseItem price failed for {legacy_id}")
         elif "<Ack>Warning</Ack>" in resp_text:
@@ -694,13 +718,61 @@ class EbayClient:
         """
         if not variation_sku:
             return None, None
+        vs = str(variation_sku).strip()
+        # v1|itemid|0 = single-item listing, no variation SKU needed
+        if vs.startswith("v1|") and vs.endswith("|0"):
+            return None, None
         try:
-            parsed = json.loads(variation_sku) if isinstance(variation_sku, str) else variation_sku
+            parsed = json.loads(vs)
             if isinstance(parsed, dict):
                 return None, parsed
         except (json.JSONDecodeError, TypeError):
             pass
-        return str(variation_sku).strip(), None
+        return vs, None
+
+    def _get_variation_aspects_by_hint(self, item_id, hint_value):
+        """Call GetItem and return the VariationSpecifics dict for the variation
+        whose aspect value matches hint_value. If only one variation exists,
+        returns its aspects regardless. Used as fallback for Non-ManageBySKU items."""
+        import xml.etree.ElementTree as ET
+        try:
+            xml_body = (
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+                f'<ItemID>{item_id}</ItemID>'
+                '<IncludeItemSpecifics>true</IncludeItemSpecifics>'
+                '</GetItemRequest>'
+            )
+            resp_text = self._trading_api_call("GetItem", xml_body)
+            root = ET.fromstring(resp_text)
+            ns = {'e': 'urn:ebay:apis:eBLBaseComponents'}
+            variations = root.findall('.//e:Variations/e:Variation', ns)
+            if not variations:
+                return None
+            # Build list of (aspects_dict) for each variation
+            all_aspects = []
+            for variation in variations:
+                specs = {}
+                for nvl in variation.findall('e:VariationSpecifics/e:NameValueList', ns):
+                    name = nvl.findtext('e:Name', namespaces=ns)
+                    value = nvl.findtext('e:Value', namespaces=ns)
+                    if name and value:
+                        specs[name] = value
+                if specs:
+                    all_aspects.append(specs)
+            # If only one variation, return it
+            if len(all_aspects) == 1:
+                return all_aspects[0]
+            # Try to match hint_value to one of the aspect values
+            hint = str(hint_value).strip()
+            for specs in all_aspects:
+                if hint in specs.values():
+                    return specs
+            logger.warning("_get_variation_aspects_by_hint: no match for '%s' in item %s, using first", hint, item_id)
+            return all_aspects[0] if all_aspects else None
+        except Exception as e:
+            logger.warning("_get_variation_aspects_by_hint failed for item %s: %s", item_id, e)
+            return None
 
     def update_inventory_quantity(self, item_id, quantity, variation_sku=None):
         """Push stock update to eBay.
@@ -757,6 +829,30 @@ class EbayClient:
             call_name = "ReviseInventoryStatus"
 
         if "<Ack>Failure</Ack>" in resp_text:
+            # Self-healing fallback: if Non-ManageBySKU error, retry with VariationSpecifics
+            if call_name == "ReviseInventoryStatus" and ("21916799" in resp_text or "SKU Mismatch" in resp_text or "Non-ManageBySKU" in resp_text):
+                logger.warning("ReviseInventoryStatus Non-ManageBySKU for %s — trying GetItem aspect fallback", legacy_id)
+                hint = sku_str or str(variation_sku or "")
+                fallback_aspects = self._get_variation_aspects_by_hint(legacy_id, hint)
+                if fallback_aspects:
+                    specs_xml = self._variation_specifics_xml(fallback_aspects)
+                    fallback_body = (
+                        '<?xml version="1.0" encoding="utf-8"?>'
+                        '<ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+                        "<Item>"
+                        f"<ItemID>{legacy_id}</ItemID>"
+                        "<Variations><Variation>"
+                        f"<Quantity>{quantity}</Quantity>"
+                        f"{specs_xml}"
+                        "</Variation></Variations>"
+                        "</Item>"
+                        "</ReviseItemRequest>"
+                    )
+                    resp_text = self._trading_api_call("ReviseItem", fallback_body)
+                    if "<Ack>Failure</Ack>" not in resp_text:
+                        logger.info("Stock pushed to eBay item %s qty=%s (aspect fallback)", legacy_id, quantity)
+                        return
+                    logger.error("ReviseItem aspect fallback also failed for %s: %s", legacy_id, resp_text[:400])
             logger.error("%s Failure for %s: %s", call_name, legacy_id, resp_text[:500])
             raise RuntimeError(f"{call_name} failed for {legacy_id}")
         elif "<Ack>Warning</Ack>" in resp_text:

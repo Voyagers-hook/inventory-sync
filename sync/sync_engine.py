@@ -903,7 +903,10 @@ class SyncEngine:
         total += self.sync_pending_price_changes()
 
         total += self.push_pending_tracking()
-        self.update_daily_snapshots()
+        try:
+            self.update_daily_snapshots()
+        except Exception as e:
+            logger.warning(f"update_daily_snapshots failed (non-fatal): {e}")
         self.db.set_setting("last_full_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         return total
 
@@ -1096,6 +1099,9 @@ class SyncEngine:
             logger.error(f"process_ebay_orders failed (non-fatal, continuing): {e}")
 
         self.db.set_setting("last_full_sync", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-        self.update_daily_snapshots()
+        try:
+            self.update_daily_snapshots()
+        except Exception as e:
+            logger.warning(f"update_daily_snapshots failed (non-fatal): {e}")
 
         return count
