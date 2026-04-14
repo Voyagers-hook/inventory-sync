@@ -477,6 +477,37 @@ class EbayClient:
     # Orders
     # ------------------------------------------------------------------
 
+    def get_item_stock(self, item_id, variation_sku=None):
+        """Get current stock for an eBay item via GetItem.
+        For single-item listings returns Item.Quantity.
+        For variation listings tries to match by variation_sku; returns None if can't match
+        (so we never set a wrong stock value on a variant we can't identify)."""
+        import re
+        try:
+            xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials><eBayAuthToken>{self._get_token()}</eBayAuthToken></RequesterCredentials>
+  <ItemID>{item_id}</ItemID>
+  <DetailLevel>ReturnAll</DetailLevel>
+</GetItemRequest>"""
+            resp = self._trading_api_call("GetItem", xml)
+            if "<Variations>" in resp:
+                if variation_sku:
+                    m = re.search(
+                        r'<Variation>\s*<SKU>' + re.escape(str(variation_sku)) + r'</SKU>.*?<Quantity>(\d+)</Quantity>',
+                        resp, re.DOTALL
+                    )
+                    if m:
+                        return int(m.group(1))
+                logger.warning(f"get_item_stock: variation item {item_id} sku={variation_sku} not matched — skipping")
+                return None
+            else:
+                m = re.search(r'<Quantity>(\d+)</Quantity>', resp)
+                return int(m.group(1)) if m else None
+        except Exception as e:
+            logger.error(f"get_item_stock failed for {item_id}: {e}")
+            return None
+
     def get_orders(self, created_after=None, days_back=30):
         """Fetch recent orders via Fulfillment API."""
         from datetime import datetime, timedelta, timezone

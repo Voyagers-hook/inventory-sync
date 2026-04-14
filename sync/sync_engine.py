@@ -484,9 +484,17 @@ class SyncEngine:
     # ─── Order Processing ────────────────────────────────────────────────────
 
     def process_squarespace_orders(self, since: str = None):
-        """Process new SS orders → deduct stock → mark variant needs_sync=TRUE."""
+        """Process new SS orders → read actual SS stock → mark variant needs_sync=TRUE."""
         logger.info(f"Processing SS orders since {since}")
         orders = self.ss.get_orders(modified_after=since)
+        if not orders:
+            return 0
+        # Fetch SS inventory once up front — dict of {variantId: quantity}
+        try:
+            ss_inventory = {i["variantId"]: i.get("quantity", 0) for i in self.ss.get_inventory()}
+        except Exception as e:
+            logger.warning(f"Could not fetch SS inventory for order stock sync: {e}")
+            ss_inventory = {}
         processed = 0
         for order in orders:
             order_id = order.get("id")
@@ -528,19 +536,24 @@ class SyncEngine:
 
                 if product:
                     variant_db_id = product["id"]  # this is variant_id in v2
-                    inv_rows = self.db.get_inventory(variant_id=variant_db_id)
-                    if inv_rows:
-                        inv = inv_rows[0]
-                        new_stock = max(0, inv["total_stock"] - qty_sold)
-                        self.db.upsert_inventory({
-                            "id": inv["id"],
-                            "variant_id": variant_db_id,
-                            "product_id": product.get("product_id"),
-                            "total_stock": new_stock,
-                        })
-                        # Mark needs_sync so hourly job pushes new stock to eBay too
-                        self.db.mark_variant_needs_sync(variant_db_id)
-                        logger.info(f"SS sale: {sku} qty={qty_sold} → stock now {new_stock} (needs_sync=TRUE)")
+                    # Read actual current stock from Squarespace rather than subtracting
+                    # (Squarespace already decremented its own stock when the order was placed)
+                    ss_vid = variant_id  # SS variantId from the order line item
+                    current_stock = ss_inventory.get(ss_vid)
+                    if current_stock is not None:
+                        inv_rows = self.db.get_inventory(variant_id=variant_db_id)
+                        if inv_rows:
+                            inv = inv_rows[0]
+                            self.db.upsert_inventory({
+                                "id": inv["id"],
+                                "variant_id": variant_db_id,
+                                "product_id": product.get("product_id"),
+                                "total_stock": current_stock,
+                            })
+                            self.db.mark_variant_needs_sync(variant_db_id)
+                            logger.info(f"SS sale: {sku} → SS stock={current_stock} synced to dashboard (needs_sync=TRUE)")
+                    else:
+                        logger.warning(f"SS sale: {sku} variantId={ss_vid} not in SS inventory — skipping stock update")
             processed += 1
         logger.info(f"SS orders processed: {processed}")
         return processed
@@ -607,19 +620,23 @@ class SyncEngine:
 
                 if product:
                     variant_db_id = product["id"]  # variant_id in v2
-                    inv_rows = self.db.get_inventory(variant_id=variant_db_id)
-                    if inv_rows:
-                        inv = inv_rows[0]
-                        new_stock = max(0, inv["total_stock"] - qty_sold)
-                        self.db.upsert_inventory({
-                            "id": inv["id"],
-                            "variant_id": variant_db_id,
-                            "product_id": product.get("product_id"),
-                            "total_stock": new_stock,
-                        })
-                        # Mark needs_sync so hourly job pushes new stock to SS too
-                        self.db.mark_variant_needs_sync(variant_db_id)
-                        logger.info(f"eBay sale: {sku} qty={qty_sold} → stock now {new_stock} (needs_sync=TRUE)")
+                    # Read actual current stock from eBay rather than subtracting
+                    # (eBay already decremented its own stock when the order was placed)
+                    current_stock = self.ebay.get_item_stock(legacy_item_id, variation_sku=sku or None)
+                    if current_stock is not None:
+                        inv_rows = self.db.get_inventory(variant_id=variant_db_id)
+                        if inv_rows:
+                            inv = inv_rows[0]
+                            self.db.upsert_inventory({
+                                "id": inv["id"],
+                                "variant_id": variant_db_id,
+                                "product_id": product.get("product_id"),
+                                "total_stock": current_stock,
+                            })
+                            self.db.mark_variant_needs_sync(variant_db_id)
+                            logger.info(f"eBay sale: item {legacy_item_id} → eBay stock={current_stock} synced to dashboard (needs_sync=TRUE)")
+                    else:
+                        logger.warning(f"eBay sale: item {legacy_item_id} sku={sku} — could not read stock from eBay, skipping")
 
             processed += 1
 
