@@ -182,6 +182,27 @@ class SyncEngine:
                 if len(parts) >= 2:
                     existing_ebay_bare_ids.add(parts[1])
 
+        # Build lookup: variant_id → product_id (from existing_variants dict)
+        variant_id_to_product_id = {
+            v["id"]: v["product_id"]
+            for v in existing_variants.values()
+            if v.get("id") and v.get("product_id")
+        }
+
+        # Build lookup: SS product ID → existing DB product ID
+        # (so new variants on an already-linked SS product go to the right product)
+        ss_product_to_db_product = {}
+        for cl in existing_listings:
+            if cl.get("channel") == "squarespace":
+                ss_pid = cl.get("channel_product_id")
+                vid    = cl.get("variant_id")
+                if ss_pid and vid and vid in variant_id_to_product_id:
+                    ss_product_to_db_product[ss_pid] = variant_id_to_product_id[vid]
+
+        # Also track SS product IDs being created this run (for multi-variant SS products
+        # where none of the variants exist yet)
+        ss_product_to_new_product_id = {}  # ss_product_id → new product_id
+
         # ── 2. Fetch platform catalogues ──────────────────────────────────
         if skip_squarespace:
             logger.info("Skipping Squarespace sync")
@@ -243,17 +264,34 @@ class SyncEngine:
                         })
                 elif sku not in creating_skus:
                     creating_skus.add(sku)
-                    product_id = str(uuid_mod.uuid4())
                     variant_id = str(uuid_mod.uuid4())
-                    new_products.append({
-                        "id": product_id, "name": name,
-                        "sku": sku,
-                        "description": (prod.get("description") or "")[:500],
-                        "status": "active", "active": True,
-                    })
+
+                    # Check if this SS product is already linked to an existing DB product
+                    # (handles new variants added to an already-synced product)
+                    existing_db_product_id = (
+                        ss_product_to_db_product.get(prod["id"]) or
+                        ss_product_to_new_product_id.get(prod["id"])
+                    )
+
+                    if existing_db_product_id:
+                        # Add variant to existing product — no new product row needed
+                        product_id = existing_db_product_id
+                        logger.info(f"SS variant {sku} → adding to existing product {product_id}")
+                    else:
+                        # Brand new product
+                        product_id = str(uuid_mod.uuid4())
+                        ss_product_to_new_product_id[prod["id"]] = product_id
+                        new_products.append({
+                            "id": product_id, "name": name,
+                            "sku": sku,
+                            "description": (prod.get("description") or "")[:500],
+                            "status": "active", "active": True,
+                        })
+
                     new_variants.append({
                         "id": variant_id, "product_id": product_id,
                         "internal_sku": sku, "needs_sync": False,
+                        "option1": " / ".join(str(v) for v in (variant.get("attributes") or {}).values() if v) or None,
                     })
                     new_inventory.append({
                         "variant_id": variant_id, "product_id": product_id,
